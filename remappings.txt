@@ -1,0 +1,3 @@
+@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/
+erc721a/=lib/ERC721A/
+forge-std/=lib/forge-std/src/
