@@ -44,7 +44,8 @@ export default function Home() {
             <span className="text-gray-400">({String(symbol ?? "")})</span>
           </h1>
           <p className="mt-1 text-sm text-gray-500">
-            Avalanche Fuji 上的 ECDSA 白名单创世 NFT——每钱包 1 张，图由后端签名分配。
+            Avalanche Fuji 上的 ECDSA 白名单创世 NFT——白名单钱包按配额 mint（可领多张），
+            图可自动生成或自选 URL。
           </p>
           <p className="mt-1 font-mono text-xs text-gray-400">{CONTRACT_ADDRESS}</p>
         </div>
