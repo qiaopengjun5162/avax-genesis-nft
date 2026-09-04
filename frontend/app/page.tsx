@@ -8,25 +8,31 @@ import MintPanel from "@/components/mint-panel";
 import Gallery from "@/components/gallery";
 
 export default function Home() {
+  // 轮询：mint 上链后 stats 自动更新（治 wagmi 读的陈旧显示）
+  const poll = { refetchInterval: 3000 } as const;
   const { data: name } = useReadContract({
     address: CONTRACT_ADDRESS,
     abi: genesisMintAbi,
     functionName: "name",
+    query: poll,
   });
   const { data: symbol } = useReadContract({
     address: CONTRACT_ADDRESS,
     abi: genesisMintAbi,
     functionName: "symbol",
+    query: poll,
   });
   const { data: status } = useReadContract({
     address: CONTRACT_ADDRESS,
     abi: genesisMintAbi,
     functionName: "status",
+    query: poll,
   });
   const { data: totalSupply } = useReadContract({
     address: CONTRACT_ADDRESS,
     abi: genesisMintAbi,
     functionName: "totalSupply",
+    query: poll,
   });
 
   return (

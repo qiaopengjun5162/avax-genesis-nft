@@ -15,8 +15,8 @@ import { ethers } from "ethers";
 
 export const FUJI_CHAIN_ID = 43113;
 export const FUJI_RPC = "https://api.avax-test.network/ext/bc/C/rpc";
-// GenesisMint 演示实例 #2（2026-09-04，干净状态供浏览器 mint 演示；实例#1 0x55Ab… 已有人领过）
-export const CONTRACT_ADDRESS = "0xE9d6E87644e4498f5d94391b6F4553D3a58d6198";
+// GenesisMint v3 演示实例（2026-09-04：签名按次授权，钱包可 mint 多张）
+export const CONTRACT_ADDRESS = "0x7AD0921D80CeFC98889a84B960c74866A452Cc2A";
 
 export function buildInnerHash(
   wallet: string,

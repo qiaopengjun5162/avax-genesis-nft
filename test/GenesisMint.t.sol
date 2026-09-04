@@ -158,14 +158,31 @@ contract GenesisMintTest is Test {
         nft.mint{value: PRICE}(_uri(1), sig);
     }
 
-    function test_RevertWhen_SecondMintSameWallet() public {
+    function test_Mint_SameWalletMultipleUris() public {
+        // v3：同钱包可 mint 多张——每张不同图 = 不同签名
         _startMint();
         vm.prank(alice);
         nft.mint{value: PRICE}(_uri(1), _sign(signerPk, alice, _uri(1)));
+        vm.prank(alice);
+        nft.mint{value: PRICE}(_uri(2), _sign(signerPk, alice, _uri(2)));
+        vm.prank(alice);
+        nft.mint{value: PRICE}(_uri(3), _sign(signerPk, alice, _uri(3)));
+
+        assertEq(nft.balanceOf(alice), 3);
+        assertEq(nft.numberMinted(alice), 3);
+        assertEq(nft.totalSupply(), 3);
+    }
+
+    function test_RevertWhen_SameSignatureReplayed() public {
+        // 同一 (钱包, 图) 签名只能用一次 → 第二笔 SignatureAlreadyUsed
+        _startMint();
+        bytes memory sig = _sign(signerPk, alice, _uri(1));
+        vm.prank(alice);
+        nft.mint{value: PRICE}(_uri(1), sig);
 
         vm.prank(alice);
-        vm.expectRevert(GenesisMint.WalletAlreadyMinted.selector);
-        nft.mint{value: PRICE}(_uri(2), _sign(signerPk, alice, _uri(2)));
+        vm.expectRevert(GenesisMint.SignatureAlreadyUsed.selector);
+        nft.mint{value: PRICE}(_uri(1), sig);
     }
 
     function test_RevertWhen_ForgedSignature() public {
@@ -244,20 +261,18 @@ contract GenesisMintTest is Test {
 
     function test_MaxSupplyBound() public {
         vm.prank(owner);
-        nft.setPrice(0); // 免费灌满 1000 张，避免值转移精度问题
+        nft.setPrice(0); // 免费灌满，避免值转移精度问题
         _startMint();
+        // v3：单钱包可连续 mint 多张（每张不同图不同签名）
+        vm.startPrank(alice);
         for (uint256 i = 0; i < nft.MAX_SUPPLY(); i++) {
-            // 每钱包限 1 张 → 用 1000 个不同钱包各自 mint 一张
-            uint256 wPk = 0xA11C0 + i; // 每钱包自己的 pk（仅用于生成地址）
-            address w = vm.addr(wPk);
             string memory u = _uri(1000 + i);
-            bytes memory s = _sign(signerPk, w, u); // 后端 signer 给每个钱包签
-            vm.prank(w);
-            nft.mint(u, s);
+            nft.mint(u, _sign(signerPk, alice, u));
         }
+        vm.stopPrank();
         assertEq(nft.totalSupply(), nft.MAX_SUPPLY());
 
-        // 供给已满；alice 再 mint → 上限报错（注意此时供给检查先于钱包检查触发）
+        // 供给已满 → 上限报错（先于签名检查触发）
         vm.prank(alice);
         vm.expectRevert(GenesisMint.MaxSupplyExceeded.selector);
         nft.mint(_uri(5000), _sign(signerPk, alice, _uri(5000)));

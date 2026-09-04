@@ -2,17 +2,19 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { ethers } from "ethers";
 
-/** 白名单：wallet → 分配的创世序号。data/allowlist.json 维护 */
-export type Allowlist = Record<string, { index: number }>;
+/** 白名单配额：wallet → 可 mint 张数上限（链上 numberMinted < limit 才给签） */
+export type Allowlist = Record<string, { limit: number }>;
 
 export function loadAllowlist(
   path = resolve(import.meta.dirname, "../data/allowlist.json"),
 ): Allowlist {
   try {
     const raw: Allowlist = JSON.parse(readFileSync(path, "utf8"));
-    // 归一化地址大小写，防查表漏配
     return Object.fromEntries(
-      Object.entries(raw).map(([k, v]) => [ethers.getAddress(k), v]),
+      Object.entries(raw).map(([k, v]) => [
+        ethers.getAddress(k),
+        { limit: Math.max(1, Number(v.limit ?? 1)) },
+      ]),
     );
   } catch {
     return {};

@@ -54,8 +54,8 @@ export const wagmiConfig = createConfig({
   ssr: true, // Next.js App Router 必需
 });
 
-/** GenesisMint 合约 —— 演示实例 #2（干净状态，0xE91e 可 mint；实例#1 已用） */
-export const CONTRACT_ADDRESS = "0xE9d6E87644e4498f5d94391b6F4553D3a58d6198";
+/** GenesisMint v3 合约（签名按次授权，钱包可 mint 多张；0x7AD092… 已验源码） */
+export const CONTRACT_ADDRESS = "0x7AD0921D80CeFC98889a84B960c74866A452Cc2A";
 
 /** 签名后端（Node 服务，见 backend/） */
 export const SIGNER_URL =

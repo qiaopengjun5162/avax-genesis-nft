@@ -22,6 +22,7 @@ export default function Gallery() {
     address: CONTRACT_ADDRESS,
     abi: genesisMintAbi,
     functionName: "totalSupply",
+    query: { refetchInterval: 3000 },
   });
 
   const scanLimit = Number(totalSupply ?? 0n) > 40 ? 40 : Number(totalSupply ?? 0n);
@@ -29,6 +30,7 @@ export default function Gallery() {
   const { data: mine, isFetching } = useQuery({
     queryKey: ["my-nfts", address, Number(totalSupply ?? 0n)],
     enabled: Boolean(address && publicClient && scanLimit > 0),
+    refetchInterval: 4000,
     queryFn: async () => {
       const out: Nft[] = [];
       for (let id = 0; id < scanLimit; id++) {

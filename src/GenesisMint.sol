@@ -10,15 +10,19 @@ import {Base64} from "@openzeppelin/contracts/utils/Base64.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
 /**
- * @title GenesisMint
- * @dev ERC721A 创世 NFT：ECDSA 签名白名单 mint（一人一图一签名）
+ * @title GenesisMint v3
+ * @dev ERC721A 创世 NFT：ECDSA 签名白名单 mint（签名按次授权，可多次 mint）
  *
- * 设计（相对参考 MFNFT 的修复，见 README）：
- *  - 签名绑定 (chainid, 本合约, minter, imageURI) → 防跨链/跨合约/跨钱包重放
- *  - 每钱包限 1 张（_numberMinted 链上强制）→ 签名只能用自己的
- *  - EOA 检查去掉：msg.sender 绑定已足够，智能合约钱包(ERC-1271)可扩展
- *  - 退款用低层 call 而非 transfer(2300 gas)
- *  - 全部 custom errors，省 gas 且便于前端解析
+ * 相对 v1（每钱包 1 张）的改动：
+ *  - 去掉链上"每钱包限 1 张"（_numberMinted 检查）→ 改由后端按配额发签名
+ *  - 每个 (wallet, imageURI) 签名**只能用一次**：usedHashes 记已用哈希
+ *    → 同一签名重放（铸两张同图）被拒 = SignatureAlreadyUsed
+ *  - 白名单配额由后端控制：钱包可 mint N 张（每张不同图/不同签名），测试无需换账户
+ *  - 图可以是后端分配的创世图，也可以是用户自选的 URL（签名照绑，安全模型不变）
+ *
+ * 安全模型（不变，参考 MFNFT 修复）：
+ *  - 签名绑定 (chainid, 本合约, msg.sender, imageURI) → 防跨链/跨合约/跨钱包重放
+ *  - 签名即授权：没有后端签名，任何钱包都 mint 不了
  */
 contract GenesisMint is ERC721A, Ownable, ReentrancyGuard {
     using ECDSA for bytes32;
@@ -35,12 +39,14 @@ contract GenesisMint is ERC721A, Ownable, ReentrancyGuard {
     address public signer;
     string public description;
 
-    // tokenId => 该 NFT 的独立图片 URI（后端按钱包分配）
+    // tokenId => 该 NFT 的图片 URI（后端分配或用户自选）
     mapping(uint256 => string) private _tokenImageURIs;
+    // 已使用签名哈希（inner hash）→ 防同一签名重放
+    mapping(bytes32 => bool) public usedHashes;
 
     error MintNotStarted();
-    error WalletAlreadyMinted();
     error InvalidSignature();
+    error SignatureAlreadyUsed();
     error MaxSupplyExceeded();
     error EtherAmountMismatch(uint256 required, uint256 sent);
     error RefundFailed();
@@ -67,9 +73,10 @@ contract GenesisMint is ERC721A, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev 白名单 mint：前端向后端要签名 → 提交 (imageURI, signature)
+     * @dev 白名单 mint（一次一张，配额由后端签名控制）
      * signature = signer 对 keccak(chainid, address(this), msg.sender, imageURI)
-     *            经 toEthSignedMessageHash 包装后的哈希的 ECDSA 签名
+     *            经 toEthSignedMessageHash 包装后的 ECDSA 签名
+     * 每个签名只能用一次：同一 (钱包, 图) 想铸第二张会被 SignatureAlreadyUsed 拒绝
      */
     function mint(
         string calldata imageURI,
@@ -77,10 +84,13 @@ contract GenesisMint is ERC721A, Ownable, ReentrancyGuard {
     ) external payable nonReentrant returns (uint256 tokenId) {
         if (status != Status.Started) revert MintNotStarted();
         if (_totalMinted() + 1 > MAX_SUPPLY) revert MaxSupplyExceeded();
-        if (_numberMinted(msg.sender) != 0) revert WalletAlreadyMinted();
         if (msg.value < price) revert EtherAmountMismatch(price, msg.value);
-        if (!_isValidSignature(imageURI, signature)) revert InvalidSignature();
 
+        bytes32 inner = _innerHash(imageURI);
+        if (usedHashes[inner]) revert SignatureAlreadyUsed();
+        if (_recover(inner, signature) != signer) revert InvalidSignature();
+
+        usedHashes[inner] = true;
         tokenId = _nextTokenId();
         _safeMint(msg.sender, 1);
         _tokenImageURIs[tokenId] = imageURI;
@@ -130,15 +140,14 @@ contract GenesisMint is ERC721A, Ownable, ReentrancyGuard {
     // 内部
     ////////////////////////////////////////////////////////////////
 
-    function _isValidSignature(
-        string calldata imageURI,
-        bytes calldata signature
-    ) internal view returns (bool) {
-        bytes32 inner = keccak256(
+    function _innerHash(string calldata imageURI) internal view returns (bytes32) {
+        return keccak256(
             abi.encodePacked(block.chainid, address(this), msg.sender, imageURI)
         );
-        address recovered = MessageHashUtils.toEthSignedMessageHash(inner).recover(signature);
-        return recovered == signer && recovered != address(0);
+    }
+
+    function _recover(bytes32 inner, bytes calldata signature) internal pure returns (address) {
+        return MessageHashUtils.toEthSignedMessageHash(inner).recover(signature);
     }
 
     function _refundExcess() private {

@@ -1,9 +1,12 @@
 /**
- * 签名服务 HTTP API（node:http 零框架）
+ * GenesisMint v3 签名服务 HTTP API（node:http 零框架）
  *
  *  GET  /              服务信息
- *  GET  /allowlist/:w  查白名单状态
- *  POST /sign          {wallet} → {wallet, imageURI, signature}
+ *  GET  /allowlist/:w  查配额（allowlisted / limit / minted）
+ *  POST /sign          {wallet, imageURI?} → {wallet, imageURI, signature, minted, limit}
+ *                       imageURI 可选：留空=后端自动分配创世图；填=用户自选图 URL
+ *
+ * 配额逻辑：链上 numberMinted(wallet) < limit 才给签（钱包可 mint 多张，无需换账户）
  *
  * 运行：node src/server.ts   （Node ≥23 原生跑 TS，无需构建）
  */
@@ -13,6 +16,7 @@ import { env } from "./env.ts";
 import { CONTRACT_ADDRESS, FUJI_CHAIN_ID, FUJI_RPC, recoverSigner, signMint } from "./protocol.ts";
 import { genesisArt } from "./art.ts";
 import { entryFor, isAllowlisted, loadAllowlist } from "./allowlist.ts";
+import { numberMintedOnChain, totalSupplyOnChain } from "./chain.ts";
 
 const PORT = Number(env.PORT ?? 8787);
 const signerPk = env.SIGNER_PRIVATE_KEY;
@@ -23,34 +27,37 @@ if (!signerPk) {
 const signer = new ethers.Wallet(signerPk);
 const allowlist = loadAllowlist();
 
-console.log(`✅ GenesisMint 签名服务启动`);
+console.log(`✅ GenesisMint v3 签名服务启动`);
 console.log(`   合约    : ${CONTRACT_ADDRESS} (chainId ${FUJI_CHAIN_ID})`);
 console.log(`   signer  : ${signer.address}`);
-console.log(`   白名单  : ${Object.keys(allowlist).length} 个钱包`);
+console.log(`   白名单  : ${Object.keys(allowlist).length} 个钱包（配额制，可多次 mint）`);
 console.log(`   监听    : http://127.0.0.1:${PORT}`);
 
+const CORS = {
+  "access-control-allow-origin": env.CORS_ORIGIN ?? "*",
+  "access-control-allow-methods": "GET,POST,OPTIONS",
+  "access-control-allow-headers": "content-type",
+};
+
 function send(res, code: number, body: unknown) {
-  const data = JSON.stringify(body, null, 2);
-  // 开发期允许跨源（生产应配 CORS_ORIGIN 白名单）
-  res.writeHead(code, {
-    "content-type": "application/json; charset=utf-8",
-    "access-control-allow-origin": env.CORS_ORIGIN ?? "*",
-    "access-control-allow-methods": "GET,POST,OPTIONS",
-    "access-control-allow-headers": "content-type",
-  });
-  res.end(data);
+  res.writeHead(code, { "content-type": "application/json; charset=utf-8", ...CORS });
+  res.end(JSON.stringify(body, null, 2));
+}
+
+/** 用户自选图校验：http(s)/ipfs/data 开头 + 长度上限 */
+function validUserImage(uri: string): boolean {
+  return (
+    uri.length >= 8 &&
+    uri.length <= 500 &&
+    /^(https?:\/\/|ipfs:\/\/|data:image\/)/i.test(uri)
+  );
 }
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
 
-  // CORS 预检
   if (req.method === "OPTIONS") {
-    res.writeHead(204, {
-      "access-control-allow-origin": env.CORS_ORIGIN ?? "*",
-      "access-control-allow-methods": "GET,POST,OPTIONS",
-      "access-control-allow-headers": "content-type",
-    });
+    res.writeHead(204, CORS);
     return res.end();
   }
 
@@ -61,22 +68,24 @@ const server = createServer(async (req, res) => {
         service: "genesis-mint-signer",
         contract: CONTRACT_ADDRESS,
         chainId: FUJI_CHAIN_ID,
-        rpc: FUJI_RPC,
         signer: signer.address,
         allowlistCount: Object.keys(allowlist).length,
-        protocol: "EIP-191 over keccak(chainid, contract, wallet, imageURI)",
+        protocol: "EIP-191 over keccak(chainid, contract, wallet, imageURI)，每签名一次有效",
       });
     }
 
-    // GET /allowlist/:wallet
+    // GET /allowlist/:wallet —— 前端预检配额
     const alMatch = url.pathname.match(/^\/allowlist\/(0x[0-9a-fA-F]{40})$/);
     if (req.method === "GET" && alMatch) {
       const wallet = ethers.getAddress(alMatch[1]);
       const entry = entryFor(wallet, allowlist);
+      const minted = entry ? await numberMintedOnChain(wallet) : 0;
       return send(res, 200, {
         wallet,
         allowlisted: Boolean(entry),
-        index: entry?.index ?? null,
+        limit: entry?.limit ?? 0,
+        minted,
+        remaining: entry ? Math.max(0, entry.limit - minted) : 0,
       });
     }
 
@@ -84,7 +93,7 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/sign") {
       let body = "";
       for await (const chunk of req) body += chunk;
-      const { wallet } = JSON.parse(body || "{}");
+      const { wallet, imageURI } = JSON.parse(body || "{}");
       if (!wallet) return send(res, 400, { error: "missing wallet" });
 
       let addr: string;
@@ -93,19 +102,45 @@ const server = createServer(async (req, res) => {
       } catch {
         return send(res, 400, { error: "invalid wallet address" });
       }
+
       const entry = entryFor(addr, allowlist);
-      if (!entry) return send(res, 403, { error: "wallet not allowlisted", wallet: addr });
+      if (!entry) return send(res, 403, { error: "钱包不在白名单", wallet: addr });
 
-      const imageURI = genesisArt(addr, entry.index);
-      const signature = await signMint(signer, addr, imageURI);
-
-      // 自检：恢复出的地址必须等于 signer
-      const recovered = recoverSigner(addr, imageURI, signature);
-      if (recovered !== signer.address) {
-        return send(res, 500, { error: "self-check failed", recovered });
+      const minted = await numberMintedOnChain(addr);
+      if (minted >= entry.limit) {
+        return send(res, 403, {
+          error: `配额已用完（${minted}/${entry.limit}）`,
+          wallet: addr,
+          minted,
+          limit: entry.limit,
+        });
       }
-      console.log(`✍️  sign ${addr} → #${entry.index} (${signature.slice(0, 18)}…)`);
-      return send(res, 200, { wallet: addr, index: entry.index, imageURI, signature });
+
+      // 图：用户自选 or 后端按下一 tokenId 分配创世图（全局唯一序号）
+      let finalUri = imageURI;
+      if (imageURI !== undefined) {
+        if (typeof imageURI !== "string" || !validUserImage(imageURI)) {
+          return send(res, 400, { error: "imageURI 非法：需 http(s)/ipfs/data:image 开头且 ≤500 字符" });
+        }
+      } else {
+        const next = await totalSupplyOnChain();
+        finalUri = genesisArt(addr, next);
+      }
+
+      const signature = await signMint(signer, addr, finalUri);
+      const recovered = recoverSigner(addr, finalUri, signature);
+      if (recovered !== signer.address) {
+        return send(res, 500, { error: "self-check failed" });
+      }
+      console.log(`✍️  sign ${addr.slice(0, 8)}… (${minted + 1}/${entry.limit}) 图=${finalUri.slice(0, 30)}…`);
+      return send(res, 200, {
+        wallet: addr,
+        minted,
+        limit: entry.limit,
+        remaining: entry.limit - minted - 1,
+        imageURI: finalUri,
+        signature,
+      });
     }
 
     return send(res, 404, { error: "not found" });
