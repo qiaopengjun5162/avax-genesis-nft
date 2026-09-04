@@ -65,22 +65,22 @@ export default function Gallery() {
       </div>
 
       {!address ? (
-        <p className="text-sm text-gray-400">连接钱包后展示你的藏品。</p>
+        <p className="text-sm text-gray-500">连接钱包后展示你的藏品。</p>
       ) : mine && mine.length > 0 ? (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
           {mine.map((n) => (
-            <div key={n.tokenId} className="overflow-hidden rounded-xl border border-gray-200">
+            <div key={n.tokenId} className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={n.meta?.image} alt={n.meta?.name} className="aspect-square w-full" />
+              <img src={n.meta?.image} alt={n.meta?.name} className="aspect-square w-full bg-gray-200 object-cover" />
               <div className="p-3">
-                <p className="text-sm font-medium">{n.meta?.name ?? `#${n.tokenId}`}</p>
-                <p className="mt-0.5 text-xs text-gray-400">owner {shortAddr(n.owner)}</p>
+                <p className="text-sm font-semibold text-gray-900">{n.meta?.name ?? `#${n.tokenId}`}</p>
+                <p className="mt-0.5 text-xs text-gray-500">owner {shortAddr(n.owner)}</p>
               </div>
             </div>
           ))}
         </div>
       ) : (
-        <p className="text-sm text-gray-400">
+        <p className="text-sm text-gray-500">
           {Number(totalSupply ?? 0n) === 0 ? "还没有任何人 mint。" : "你还没有 NFT——点上面按钮领一张。"}
         </p>
       )}

@@ -71,9 +71,9 @@ export default function Home() {
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-xl bg-gray-50 p-3">
-      <p className="text-xs text-gray-400">{label}</p>
-      <p className="mt-1 text-sm font-medium">{value}</p>
+    <div className="rounded-xl border border-gray-200 bg-white p-3 shadow-sm">
+      <p className="text-xs font-medium text-gray-500">{label}</p>
+      <p className="mt-1 text-base font-semibold text-gray-900">{value}</p>
     </div>
   );
 }

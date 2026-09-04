@@ -122,7 +122,7 @@ export default function MintPanel() {
         <div className="rounded-xl border border-dashed border-gray-300 p-6 text-sm text-gray-500">
           先连接钱包。白名单钱包按配额 mint（默认每个钱包可领多张，测试不用换账户）。
         </div>
-        <p className="text-xs text-gray-400">
+        <p className="text-xs text-gray-500">
           钱包里没测试 AVAX？gas 需要一点点（mint 本身免费）——
           <a className="text-blue-600 underline" href={FAUCET_URL} target="_blank" rel="noreferrer">
             Core 水龙头领测试币
@@ -160,7 +160,7 @@ export default function MintPanel() {
       )}
 
       <div className="space-y-1.5">
-        <label className="block text-xs text-gray-500">
+        <label className="block text-xs font-medium text-gray-600">
           图片（可选）：留空 = 后端自动分配创世图；填 = 用你自己的图 URL
         </label>
         <input
@@ -232,7 +232,7 @@ export default function MintPanel() {
         </div>
       )}
 
-      <p className="text-xs text-gray-400">
+      <p className="text-xs text-gray-500">
         状态：{STATUS_TEXT.join(" / ")}。安全模型：每个签名绑定 (链+合约+钱包+图) 且只能用一次，
         图重复/跨钱包复用都会被链上拒绝。
       </p>
