@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useAccount, useWriteContract, useWaitForTransactionReceipt } from "wagmi";
-import { useQueryClient } from "@tanstack/react-query";
 import { CONTRACT_ADDRESS, SIGNER_URL, STATUS_TEXT, explorerTx, FAUCET_URL } from "@/lib/config";
 import { genesisMintAbi } from "@/lib/abi";
 
@@ -39,7 +38,6 @@ type Quota = { allowlisted: boolean; limit: number; minted: number; remaining: n
 export default function MintPanel() {
   const { address, isConnected, chainId } = useAccount();
   const { writeContractAsync } = useWriteContract();
-  const { invalidateQueries } = useQueryClient();
 
   const [busy, setBusy] = useState<"signing" | "mining" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -209,7 +207,7 @@ export default function MintPanel() {
           {txFailed ? (
             <p className="text-red-700">❌ 交易上链但执行失败（reverted）。看提示换图/换签名重试。</p>
           ) : txOk ? (
-            <p>🎉 mint 成功！NFT 已上链，画廊即将刷新。</p>
+            <p>🎉 mint 成功！NFT 已上链（画廊约 4 秒内自动刷新，无需手动）。</p>
           ) : (
             <p>⏳ 交易确认中…</p>
           )}
@@ -221,14 +219,6 @@ export default function MintPanel() {
           >
             {txHash}
           </a>
-          {txOk && (
-            <button
-              className="ml-3 rounded bg-blue-600 px-2 py-1 text-xs text-white"
-              onClick={() => invalidateQueries()}
-            >
-              立即刷新
-            </button>
-          )}
         </div>
       )}
 
