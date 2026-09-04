@@ -31,12 +31,28 @@ console.log(`   监听    : http://127.0.0.1:${PORT}`);
 
 function send(res, code: number, body: unknown) {
   const data = JSON.stringify(body, null, 2);
-  res.writeHead(code, { "content-type": "application/json; charset=utf-8" });
+  // 开发期允许跨源（生产应配 CORS_ORIGIN 白名单）
+  res.writeHead(code, {
+    "content-type": "application/json; charset=utf-8",
+    "access-control-allow-origin": env.CORS_ORIGIN ?? "*",
+    "access-control-allow-methods": "GET,POST,OPTIONS",
+    "access-control-allow-headers": "content-type",
+  });
   res.end(data);
 }
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
+
+  // CORS 预检
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "access-control-allow-origin": env.CORS_ORIGIN ?? "*",
+      "access-control-allow-methods": "GET,POST,OPTIONS",
+      "access-control-allow-headers": "content-type",
+    });
+    return res.end();
+  }
 
   try {
     // GET / 服务信息
