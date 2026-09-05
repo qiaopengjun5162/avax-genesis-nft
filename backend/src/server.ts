@@ -171,6 +171,10 @@ const server = createServer(async (req, res) => {
     if (e instanceof BodyTooLarge) {
       return send(res, 413, { error: `body 超过 ${MAX_BODY_BYTES} 字节` });
     }
+    // 前端传了坏 JSON → 客户端错误，不该记成 500
+    if (e instanceof SyntaxError) {
+      return send(res, 400, { error: "body 不是合法 JSON" });
+    }
     return send(res, 500, { error: String(e) });
   }
 });
