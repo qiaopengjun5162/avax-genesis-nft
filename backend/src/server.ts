@@ -16,7 +16,7 @@ import { env } from "./env.ts";
 import { CONTRACT_ADDRESS, FUJI_CHAIN_ID, FUJI_RPC, recoverSigner, signMint } from "./protocol.ts";
 import { genesisArt } from "./art.ts";
 import { entryFor, isAllowlisted, loadAllowlist } from "./allowlist.ts";
-import { numberMintedOnChain, totalSupplyOnChain } from "./chain.ts";
+import { numberMintedOnChain, signerOnChain, totalSupplyOnChain } from "./chain.ts";
 
 const PORT = Number(env.PORT ?? 8787);
 
@@ -40,6 +40,22 @@ console.log(`   合约    : ${CONTRACT_ADDRESS} (chainId ${FUJI_CHAIN_ID})`);
 console.log(`   signer  : ${signer.address}`);
 console.log(`   白名单  : ${Object.keys(allowlist).length} 个钱包（配额制，可多次 mint）`);
 console.log(`   监听    : http://127.0.0.1:${PORT}`);
+
+// 启动自检：本服务私钥 ↔ 链上 signer。对不上时签名会被合约全数拒绝，
+// 但服务本身照样跑、照样返回 200——等用户点 mint 才炸，最难排查。
+void (async () => {
+  const onChain = await signerOnChain();
+  if (!onChain) {
+    console.warn("⚠️  读不到链上 signer（RPC 不通 / CONTRACT_ADDRESS 不对）");
+    return;
+  }
+  if (onChain.toLowerCase() === signer.address.toLowerCase()) {
+    console.log(`   signer 自检: 与链上一致 ✅`);
+    return;
+  }
+  console.warn("⚠️  signer 不一致：链上=" + onChain + "，本服务=" + signer.address);
+  console.warn("   这样签出的名会被合约拒绝。用 owner 调 setSigner(本服务地址)，或换 SIGNER_PRIVATE_KEY。");
+})();
 
 const CORS = {
   "access-control-allow-origin": env.CORS_ORIGIN ?? "*",
