@@ -416,12 +416,14 @@ contract GenesisMintTest is Test {
         assertEq(address(nft).balance, PRICE);
     }
 
-    function test_TokenURI_EmptyImageReturnsEmpty() public {
+    function test_RevertWhen_EmptyImageURI() public {
+        // 空图会让 tokenURI 返回空串（市场/前端破图）→ 入口直接拒绝
         _startMint();
         vm.prank(alice);
+        vm.expectRevert(GenesisMint.EmptyImageURI.selector);
         nft.mint{value: PRICE}("", _sign(signerPk, alice, ""));
 
-        assertEq(bytes(nft.tokenURI(0)).length, 0);
+        assertEq(nft.totalSupply(), 0);
     }
 
     ////////////////////////////////////////////////////////////////

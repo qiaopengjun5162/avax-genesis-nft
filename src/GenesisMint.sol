@@ -57,6 +57,7 @@ contract GenesisMint is ERC721A, Ownable, ReentrancyGuard {
     error NonexistentToken();
     error ZeroAddress();
     error NoBalance();
+    error EmptyImageURI();
 
     event Minted(address indexed minter, uint256 indexed tokenId, string imageURI);
     event StatusChanged(Status status);
@@ -93,6 +94,8 @@ contract GenesisMint is ERC721A, Ownable, ReentrancyGuard {
         if (current == Status.Paused) revert MintPaused();
         if (_totalMinted() + 1 > MAX_SUPPLY) revert MaxSupplyExceeded();
         if (msg.value < price) revert EtherAmountMismatch(price, msg.value);
+        // 空图会让 tokenURI 返回空串（市场/前端显示破图），入口直接挡掉
+        if (bytes(imageURI).length == 0) revert EmptyImageURI();
 
         bytes32 inner = _innerHash(imageURI);
         if (usedHashes[inner]) revert SignatureAlreadyUsed();
