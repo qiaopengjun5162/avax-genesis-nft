@@ -345,8 +345,21 @@ contract GenesisMintTest is Test {
 
     function test_RevertWhen_WithdrawEmpty() public {
         vm.prank(owner);
-        vm.expectRevert(GenesisMint.WithdrawFailed.selector);
+        vm.expectRevert(GenesisMint.NoBalance.selector);
         nft.withdraw(payable(owner));
+    }
+
+    function test_RevertWhen_WithdrawToZeroAddress() public {
+        // 转给 0 地址的 call 会"成功"（无代码），钱等于永久烧掉 → 必须挡住
+        _startMint();
+        vm.prank(alice);
+        nft.mint{value: PRICE}(_uri(1), _sign(signerPk, alice, _uri(1)));
+
+        vm.prank(owner);
+        vm.expectRevert(GenesisMint.ZeroAddress.selector);
+        nft.withdraw(payable(address(0)));
+
+        assertEq(address(nft).balance, PRICE); // 钱没丢
     }
 
     function test_RevertWhen_SetSignerZero() public {

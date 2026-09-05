@@ -53,6 +53,7 @@ contract GenesisMint is ERC721A, Ownable, ReentrancyGuard {
     error WithdrawFailed();
     error NonexistentToken();
     error ZeroAddress();
+    error NoBalance();
 
     event Minted(address indexed minter, uint256 indexed tokenId, string imageURI);
     event StatusChanged(Status status);
@@ -130,8 +131,10 @@ contract GenesisMint is ERC721A, Ownable, ReentrancyGuard {
     }
 
     function withdraw(address payable recipient) external onlyOwner nonReentrant {
+        // 0 地址收款会"成功"但钱永久烧掉（无代码 → call 返回 true），必须显式挡住
+        if (recipient == address(0)) revert ZeroAddress();
         uint256 balance = address(this).balance;
-        if (balance == 0) revert WithdrawFailed();
+        if (balance == 0) revert NoBalance();
         (bool ok, ) = recipient.call{value: balance}("");
         if (!ok) revert WithdrawFailed();
         emit Withdrawn(recipient, balance);
