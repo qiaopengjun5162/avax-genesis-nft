@@ -10,7 +10,7 @@
  *
  * 运行：node src/server.ts   （Node ≥23 原生跑 TS，无需构建）
  */
-import { createServer } from "node:http";
+import { createServer, type IncomingMessage } from "node:http";
 import { ethers } from "ethers";
 import { env } from "./env.ts";
 import { CONTRACT_ADDRESS, FUJI_CHAIN_ID, FUJI_RPC, recoverSigner, signMint } from "./protocol.ts";
@@ -19,6 +19,14 @@ import { entryFor, isAllowlisted, loadAllowlist } from "./allowlist.ts";
 import { numberMintedOnChain, totalSupplyOnChain } from "./chain.ts";
 
 const PORT = Number(env.PORT ?? 8787);
+
+/**
+ * /sign 只需要 {wallet, imageURI}，几 KB 绰绰有余。
+ * 不设上限等于任何人都能拿超大 body 把进程内存吃满。
+ */
+const MAX_BODY_BYTES = 8 * 1024;
+
+class BodyTooLarge extends Error {}
 const signerPk = env.SIGNER_PRIVATE_KEY;
 if (!signerPk) {
   console.error("缺少 SIGNER_PRIVATE_KEY（backend/.env）");
@@ -42,6 +50,22 @@ const CORS = {
 function send(res, code: number, body: unknown) {
   res.writeHead(code, { "content-type": "application/json; charset=utf-8", ...CORS });
   res.end(JSON.stringify(body, null, 2));
+}
+
+/** 读请求体并卡死上限：超限立刻断开，不继续收完剩下的字节 */
+export async function readBody(req: IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const buf = chunk as Buffer;
+    size += buf.length;
+    if (size > MAX_BODY_BYTES) {
+      req.destroy();
+      throw new BodyTooLarge();
+    }
+    chunks.push(buf);
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 /** 用户自选图校验：http(s)/ipfs/data 开头 + 长度上限 */
@@ -91,8 +115,7 @@ const server = createServer(async (req, res) => {
 
     // POST /sign
     if (req.method === "POST" && url.pathname === "/sign") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
+      const body = await readBody(req);
       const { wallet, imageURI } = JSON.parse(body || "{}");
       if (!wallet) return send(res, 400, { error: "missing wallet" });
 
@@ -145,6 +168,9 @@ const server = createServer(async (req, res) => {
 
     return send(res, 404, { error: "not found" });
   } catch (e) {
+    if (e instanceof BodyTooLarge) {
+      return send(res, 413, { error: `body 超过 ${MAX_BODY_BYTES} 字节` });
+    }
     return send(res, 500, { error: String(e) });
   }
 });
