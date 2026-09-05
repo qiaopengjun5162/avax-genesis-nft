@@ -2,23 +2,33 @@
  * GenesisMint v3 签名服务 HTTP API（node:http 零框架）
  *
  *  GET  /              服务信息
+ *  GET  /healthz       就绪探针（容器/进程管理器用，无鉴权）
  *  GET  /allowlist/:w  查配额（allowlisted / limit / minted）
  *  POST /sign          {wallet, imageURI?} → {wallet, imageURI, signature, minted, limit}
  *                       imageURI 可选：留空=后端自动分配创世图；填=用户自选图 URL
  *
  * 配额逻辑：链上 numberMinted(wallet) < limit 才给签（钱包可 mint 多张，无需换账户）
  *
- * 运行：node src/server.ts   （Node ≥23 原生跑 TS，无需构建）
+ * 运行：node src/server.ts   （Node ≥22，需 --experimental-strip-types，见 package.json start）
  */
-import { createServer, type IncomingMessage } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { pathToFileURL } from "node:url";
 import { ethers } from "ethers";
 import { env } from "./env.ts";
 import { CONTRACT_ADDRESS, FUJI_CHAIN_ID, FUJI_RPC, recoverSigner, signMint } from "./protocol.ts";
 import { genesisArt } from "./art.ts";
-import { entryFor, isAllowlisted, loadAllowlist } from "./allowlist.ts";
+import { entryFor, loadAllowlist } from "./allowlist.ts";
 import { numberMintedOnChain, signerOnChain, totalSupplyOnChain } from "./chain.ts";
 
 const PORT = Number(env.PORT ?? 8787);
+
+/**
+ * 仅当该文件被「直接执行」（而非被 import 进测试）时才启动监听与自检，
+ * 避免单测一 import 就把端口绑了 / 因缺密钥退出进程。
+ */
+const isMain =
+  process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(process.argv[1]).href;
 
 /**
  * /sign 只需要 {wallet, imageURI}，几 KB 绰绰有余。
@@ -27,35 +37,17 @@ const PORT = Number(env.PORT ?? 8787);
 const MAX_BODY_BYTES = 8 * 1024;
 
 class BodyTooLarge extends Error {}
+
 const signerPk = env.SIGNER_PRIVATE_KEY;
-if (!signerPk) {
+let signer: ethers.Wallet | null = null;
+if (signerPk) {
+  signer = new ethers.Wallet(signerPk);
+} else if (isMain) {
+  // 真实运行缺密钥：直接失败，比「起来了但签名全被拒」好排查
   console.error("缺少 SIGNER_PRIVATE_KEY（backend/.env）");
   process.exit(1);
 }
-const signer = new ethers.Wallet(signerPk);
 const allowlist = loadAllowlist();
-
-console.log(`✅ GenesisMint v3 签名服务启动`);
-console.log(`   合约    : ${CONTRACT_ADDRESS} (chainId ${FUJI_CHAIN_ID})`);
-console.log(`   signer  : ${signer.address}`);
-console.log(`   白名单  : ${Object.keys(allowlist).length} 个钱包（配额制，可多次 mint）`);
-console.log(`   监听    : http://127.0.0.1:${PORT}`);
-
-// 启动自检：本服务私钥 ↔ 链上 signer。对不上时签名会被合约全数拒绝，
-// 但服务本身照样跑、照样返回 200——等用户点 mint 才炸，最难排查。
-void (async () => {
-  const onChain = await signerOnChain();
-  if (!onChain) {
-    console.warn("⚠️  读不到链上 signer（RPC 不通 / CONTRACT_ADDRESS 不对）");
-    return;
-  }
-  if (onChain.toLowerCase() === signer.address.toLowerCase()) {
-    console.log(`   signer 自检: 与链上一致 ✅`);
-    return;
-  }
-  console.warn("⚠️  signer 不一致：链上=" + onChain + "，本服务=" + signer.address);
-  console.warn("   这样签出的名会被合约拒绝。用 owner 调 setSigner(本服务地址)，或换 SIGNER_PRIVATE_KEY。");
-})();
 
 const CORS = {
   "access-control-allow-origin": env.CORS_ORIGIN ?? "*",
@@ -63,7 +55,7 @@ const CORS = {
   "access-control-allow-headers": "content-type",
 };
 
-function send(res, code: number, body: unknown) {
+function send(res: ServerResponse, code: number, body: unknown) {
   res.writeHead(code, { "content-type": "application/json; charset=utf-8", ...CORS });
   res.end(JSON.stringify(body, null, 2));
 }
@@ -93,7 +85,32 @@ function validUserImage(uri: string): boolean {
   );
 }
 
-const server = createServer(async (req, res) => {
+/**
+ * 就绪探针用的 RPC 健康度：3s 超时 + 15s 缓存，避免被高频探针反复打 RPC。
+ * RPC 不通返回 degraded，但服务仍存活（与启动自检的降级策略一致）。
+ */
+let rpcHealthCache: { at: number; reachable: boolean; blockNumber: number | null } | null = null;
+async function rpcHealth(): Promise<{ reachable: boolean; blockNumber: number | null }> {
+  const now = Date.now();
+  if (rpcHealthCache && now - rpcHealthCache.at < 15_000) return rpcHealthCache;
+  let reachable = false;
+  let blockNumber: number | null = null;
+  try {
+    const provider = new ethers.JsonRpcProvider(FUJI_RPC);
+    blockNumber = await Promise.race([
+      provider.getBlockNumber(),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error("rpc timeout")), 3000)),
+    ]);
+    reachable = true;
+  } catch {
+    /* RPC 不通：服务仍存活，标记为 degraded */
+  }
+  rpcHealthCache = { at: now, reachable, blockNumber };
+  return rpcHealthCache;
+}
+
+/** HTTP 请求处理（抽成可导出函数，便于不绑端口直接单测） */
+export async function handler(req: IncomingMessage, res: ServerResponse) {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
 
   if (req.method === "OPTIONS") {
@@ -108,9 +125,24 @@ const server = createServer(async (req, res) => {
         service: "genesis-mint-signer",
         contract: CONTRACT_ADDRESS,
         chainId: FUJI_CHAIN_ID,
-        signer: signer.address,
+        signer: signer?.address ?? null,
         allowlistCount: Object.keys(allowlist).length,
         protocol: "EIP-191 over keccak(chainid, contract, wallet, imageURI)，每签名一次有效",
+      });
+    }
+
+    // GET /healthz 就绪探针（无鉴权）
+    if (req.method === "GET" && url.pathname === "/healthz") {
+      const h = await rpcHealth();
+      return send(res, 200, {
+        ok: true,
+        status: !signer ? "degraded" : h.reachable ? "ok" : "degraded",
+        service: "genesis-mint-signer",
+        contract: CONTRACT_ADDRESS,
+        chainId: FUJI_CHAIN_ID,
+        signer: signer?.address ?? null,
+        rpc: { reachable: h.reachable, blockNumber: h.blockNumber },
+        uptimeSec: Math.round(process.uptime()),
       });
     }
 
@@ -131,6 +163,9 @@ const server = createServer(async (req, res) => {
 
     // POST /sign
     if (req.method === "POST" && url.pathname === "/sign") {
+      if (!signer) {
+        return send(res, 503, { error: "signer 未配置（缺 SIGNER_PRIVATE_KEY）" });
+      }
       const body = await readBody(req);
       const { wallet, imageURI } = JSON.parse(body || "{}");
       if (!wallet) return send(res, 400, { error: "missing wallet" });
@@ -193,6 +228,31 @@ const server = createServer(async (req, res) => {
     }
     return send(res, 500, { error: String(e) });
   }
-});
+}
 
-server.listen(PORT, "127.0.0.1");
+/** 启动自检：本服务私钥 ↔ 链上 signer，对不上当场告警（最隐蔽故障） */
+async function selfCheck() {
+  const onChain = await signerOnChain();
+  if (!onChain) {
+    console.warn("⚠️  读不到链上 signer（RPC 不通 / CONTRACT_ADDRESS 不对）");
+    return;
+  }
+  if (onChain.toLowerCase() === signer!.address.toLowerCase()) {
+    console.log(`   signer 自检: 与链上一致 ✅`);
+    return;
+  }
+  console.warn("⚠️  signer 不一致：链上=" + onChain + "，本服务=" + signer!.address);
+  console.warn("   这样签出的名会被合约拒绝。用 owner 调 setSigner(本服务地址)，或换 SIGNER_PRIVATE_KEY。");
+}
+
+if (isMain && signer) {
+  console.log(`✅ GenesisMint v3 签名服务启动`);
+  console.log(`   合约    : ${CONTRACT_ADDRESS} (chainId ${FUJI_CHAIN_ID})`);
+  console.log(`   signer  : ${signer.address}`);
+  console.log(`   白名单  : ${Object.keys(allowlist).length} 个钱包（配额制，可多次 mint）`);
+  console.log(`   监听    : http://127.0.0.1:${PORT}`);
+  void selfCheck();
+  createServer((req, res) => {
+    void handler(req, res);
+  }).listen(PORT, "127.0.0.1");
+}
