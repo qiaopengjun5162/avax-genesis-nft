@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# 三个并行 job：合约 / 后端 / 前端
+# 合约与后端各自独立验证；前端只跑 type-check（不构建 Next）
+
+jobs:
+  contracts:
+    name: Foundry (forge build / lint / test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+      - name: Build
+        run: forge build
+      - name: Lint
+        run: forge lint
+      - name: Test
+        run: forge test --force
+
+  backend:
+    name: Backend (node:test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install
+        working-directory: backend
+        run: npm ci
+      - name: Test
+        working-directory: backend
+        # 不需要真实 RPC：单元测试用 fixture 私钥自签自查，
+        # 不打链；缺少 .env 时 loadEnv() 静默返回空 → 启动期 check
+        # 改条件启用。CI 这层不验证"链上 signer 自检"。
+        env:
+          # 提供一个测试私钥，让启动逻辑通过 SIGNER_PRIVATE_KEY 必填检查。
+          # 它只用于 npm test，不用于任何外部访问。
+          SIGNER_PRIVATE_KEY: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+          PORT: "8787"
+        run: npm test
+
+  frontend:
+    name: Frontend (tsc --noEmit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install
+        working-directory: frontend
+        run: npm ci
+      - name: Type-check
+        working-directory: frontend
+        # 仅类型检查：next build 要启 webpack + 资源构建，拉慢 CI；
+        # 真正的渲染 bug 留到 PR 前的本地 next build 兜底。
+        run: npx tsc --noEmit
