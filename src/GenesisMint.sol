@@ -28,9 +28,11 @@ contract GenesisMint is ERC721A, Ownable, ReentrancyGuard {
     using ECDSA for bytes32;
     using Strings for uint256;
 
+    /// @dev 追加值放末尾：已有部署实例的 0/1 语义不变，ABI 兼容
     enum Status {
         Waiting,
-        Started
+        Started,
+        Paused
     }
 
     uint256 public constant MAX_SUPPLY = 1000;
@@ -45,6 +47,7 @@ contract GenesisMint is ERC721A, Ownable, ReentrancyGuard {
     mapping(bytes32 => bool) public usedHashes;
 
     error MintNotStarted();
+    error MintPaused();
     error InvalidSignature();
     error SignatureAlreadyUsed();
     error MaxSupplyExceeded();
@@ -84,7 +87,10 @@ contract GenesisMint is ERC721A, Ownable, ReentrancyGuard {
         string calldata imageURI,
         bytes calldata signature
     ) external payable nonReentrant returns (uint256 tokenId) {
-        if (status != Status.Started) revert MintNotStarted();
+        // 只读一次 storage（省 SLOAD）；未开始与暂停分开报错，前端能给不同提示
+        Status current = status;
+        if (current == Status.Waiting) revert MintNotStarted();
+        if (current == Status.Paused) revert MintPaused();
         if (_totalMinted() + 1 > MAX_SUPPLY) revert MaxSupplyExceeded();
         if (msg.value < price) revert EtherAmountMismatch(price, msg.value);
 

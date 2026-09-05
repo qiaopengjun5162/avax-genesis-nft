@@ -158,6 +158,24 @@ contract GenesisMintTest is Test {
         nft.mint{value: PRICE}(_uri(1), sig);
     }
 
+    function test_RevertWhen_MintPaused() public {
+        // 暂停：与"未开始"分开报错，便于前端给不同提示
+        _startMint();
+        vm.prank(owner);
+        nft.setStatus(GenesisMint.Status.Paused);
+
+        vm.prank(alice);
+        vm.expectRevert(GenesisMint.MintPaused.selector);
+        nft.mint{value: PRICE}(_uri(1), _sign(signerPk, alice, _uri(1)));
+
+        // 恢复后同一签名仍可用（暂停不消耗签名）
+        vm.prank(owner);
+        nft.setStatus(GenesisMint.Status.Started);
+        vm.prank(alice);
+        nft.mint{value: PRICE}(_uri(1), _sign(signerPk, alice, _uri(1)));
+        assertEq(nft.balanceOf(alice), 1);
+    }
+
     function test_Mint_SameWalletMultipleUris() public {
         // v3：同钱包可 mint 多张——每张不同图 = 不同签名
         _startMint();
