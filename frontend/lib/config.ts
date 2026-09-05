@@ -61,7 +61,11 @@ export const CONTRACT_ADDRESS = "0x7AD0921D80CeFC98889a84B960c74866A452Cc2A";
 export const SIGNER_URL =
   process.env.NEXT_PUBLIC_SIGNER_URL ?? "http://127.0.0.1:8787";
 
-export const STATUS_TEXT = ["⏳ Waiting（未开始）", "🟢 Started（进行中）"];
+export const STATUS_TEXT = [
+  "⏳ Waiting（未开始）",
+  "🟢 Started（进行中）",
+  "⏸ Paused（已暂停）",
+];
 
 export const explorerTx = (hash: string) =>
   `https://testnet.avascan.info/blockchain/c/tx/${hash}`;

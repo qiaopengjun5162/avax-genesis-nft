@@ -16,6 +16,11 @@ const REVERT_HINTS: Array<{ sel: string; hint: string }> = [
   { sel: "0x900bb2c9", hint: "这张图这个钱包已经领过了（每个签名只能用一次），换一张或重新要个签名" },
   { sel: "0x06290e4e", hint: "mint 还没开始（合约 Waiting 状态）" },
   { sel: "0x8a164f63", hint: "供给已满（1000/1000）" },
+  // 后续合约定性调整带来的新错误（v3+）——cast sig -- 验证过
+  { sel: "0xd7d248ba", hint: "mint 已被 owner 暂停（合约 Paused 状态），等恢复" }, // MintPaused
+  { sel: "0x9be4ff54", hint: "图 URL 是空的——请选一张图或留空让后端分配" }, // EmptyImageURI
+  { sel: "0xd92e233d", hint: "owner 配置错：setSigner 不能传 0 地址（合约层问题，联系 owner）" }, // ZeroAddress
+  { sel: "0xc2caa2a6", hint: "合约余额为 0 或 owner 提现失败（合约层问题，联系 owner）" }, // NoBalance
 ];
 
 function humanizeError(e: unknown): string {
