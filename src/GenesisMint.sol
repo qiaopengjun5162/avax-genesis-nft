@@ -178,9 +178,8 @@ contract GenesisMint is ERC721AQueryable, Ownable, ReentrancyGuard {
     ) public view override(ERC721A, IERC721A) returns (string memory) {
         if (!_exists(tokenId)) revert NonexistentToken();
 
+        // mint 已拒绝空图（EmptyImageURI），这里无需再判空
         string memory imageURI = _tokenImageURIs[tokenId];
-        if (bytes(imageURI).length == 0) return "";
-
         string memory json = Base64.encode(
             bytes(
                 string.concat(
