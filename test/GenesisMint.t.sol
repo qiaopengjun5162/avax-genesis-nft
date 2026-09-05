@@ -361,6 +361,29 @@ contract GenesisMintTest is Test {
         assertEq(address(nft).balance, 0);
     }
 
+    function test_TokensOfOwner_ReturnsOwnedIds() public {
+        // ERC721AQueryable 提供：一次调用取回某地址的全部 tokenId
+        // （前端画廊据此避免遍历 totalSupply 的 N 次 RPC）
+        _startMint();
+        vm.startPrank(alice);
+        nft.mint{value: PRICE}(_uri(1), _sign(signerPk, alice, _uri(1)));
+        nft.mint{value: PRICE}(_uri(2), _sign(signerPk, alice, _uri(2)));
+        vm.stopPrank();
+        vm.prank(bob);
+        nft.mint{value: PRICE}(_uri(3), _sign(signerPk, bob, _uri(3)));
+
+        uint256[] memory aliceIds = nft.tokensOfOwner(alice);
+        assertEq(aliceIds.length, 2);
+        assertEq(aliceIds[0], 0);
+        assertEq(aliceIds[1], 1);
+
+        uint256[] memory bobIds = nft.tokensOfOwner(bob);
+        assertEq(bobIds.length, 1);
+        assertEq(bobIds[0], 2);
+
+        assertEq(nft.tokensOfOwner(mallory).length, 0);
+    }
+
     function test_RevertWhen_WithdrawEmpty() public {
         vm.prank(owner);
         vm.expectRevert(GenesisMint.NoBalance.selector);

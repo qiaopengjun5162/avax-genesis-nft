@@ -2,6 +2,8 @@
 pragma solidity ^0.8.30;
 
 import {ERC721A} from "erc721a/contracts/ERC721A.sol";
+import {IERC721A} from "erc721a/contracts/IERC721A.sol";
+import {ERC721AQueryable} from "erc721a/contracts/extensions/ERC721AQueryable.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
@@ -24,7 +26,7 @@ import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
  *  - 签名绑定 (chainid, 本合约, msg.sender, imageURI) → 防跨链/跨合约/跨钱包重放
  *  - 签名即授权：没有后端签名，任何钱包都 mint 不了
  */
-contract GenesisMint is ERC721A, Ownable, ReentrancyGuard {
+contract GenesisMint is ERC721AQueryable, Ownable, ReentrancyGuard {
     using ECDSA for bytes32;
     using Strings for uint256;
 
@@ -173,7 +175,7 @@ contract GenesisMint is ERC721A, Ownable, ReentrancyGuard {
 
     function tokenURI(
         uint256 tokenId
-    ) public view override(ERC721A) returns (string memory) {
+    ) public view override(ERC721A, IERC721A) returns (string memory) {
         if (!_exists(tokenId)) revert NonexistentToken();
 
         string memory imageURI = _tokenImageURIs[tokenId];
