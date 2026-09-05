@@ -351,7 +351,7 @@ contract GenesisMintTest is Test {
 
     function test_RevertWhen_SetSignerZero() public {
         vm.prank(owner);
-        vm.expectRevert(GenesisMint.InvalidSignature.selector);
+        vm.expectRevert(GenesisMint.ZeroAddress.selector);
         nft.setSigner(address(0));
     }
 

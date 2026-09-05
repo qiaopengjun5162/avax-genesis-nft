@@ -52,6 +52,7 @@ contract GenesisMint is ERC721A, Ownable, ReentrancyGuard {
     error RefundFailed();
     error WithdrawFailed();
     error NonexistentToken();
+    error ZeroAddress();
 
     event Minted(address indexed minter, uint256 indexed tokenId, string imageURI);
     event StatusChanged(Status status);
@@ -123,7 +124,7 @@ contract GenesisMint is ERC721A, Ownable, ReentrancyGuard {
     }
 
     function setSigner(address _signer) external onlyOwner {
-        if (_signer == address(0)) revert InvalidSignature();
+        if (_signer == address(0)) revert ZeroAddress();
         signer = _signer;
         emit SignerChanged(_signer);
     }
