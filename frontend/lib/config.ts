@@ -54,8 +54,14 @@ export const wagmiConfig = createConfig({
   ssr: true, // Next.js App Router 必需
 });
 
-/** GenesisMint v3 合约（签名按次授权，钱包可 mint 多张；0x7AD092… 已验源码） */
-export const CONTRACT_ADDRESS = "0x7AD0921D80CeFC98889a84B960c74866A452Cc2A";
+/**
+ * GenesisMint v3 合约（签名按次授权，钱包可 mint 多张；0x7AD092… 已验源码）
+ * 部署新实例时通过 NEXT_PUBLIC_CONTRACT_ADDRESS 覆盖，避免改源码；
+ * 缺省仍是已验证的 Fuji 演示实例。
+ */
+export const CONTRACT_ADDRESS = (process.env.NEXT_PUBLIC_CONTRACT_ADDRESS as
+  | `0x${string}`
+  | undefined) ?? "0x7AD0921D80CeFC98889a84B960c74866A452Cc2A";
 
 /** 签名后端（Node 服务，见 backend/） */
 export const SIGNER_URL =
