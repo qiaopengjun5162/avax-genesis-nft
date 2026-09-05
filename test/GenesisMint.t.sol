@@ -361,6 +361,11 @@ contract GenesisMintTest is Test {
         assertEq(address(nft).balance, 0);
     }
 
+    function test_RevertWhen_TokenImageURINonexistent() public {
+        vm.expectRevert(GenesisMint.NonexistentToken.selector);
+        nft.tokenImageURI(0);
+    }
+
     function test_TokensOfOwner_ReturnsOwnedIds() public {
         // ERC721AQueryable 提供：一次调用取回某地址的全部 tokenId
         // （前端画廊据此避免遍历 totalSupply 的 N 次 RPC）
