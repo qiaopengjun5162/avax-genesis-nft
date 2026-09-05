@@ -5,7 +5,8 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test --experimental-strip-types test/**/*.test.ts",
+    "start": "node --experimental-strip-types src/server.ts"
   },
   "keywords": [],
   "author": "",
