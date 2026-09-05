@@ -11,6 +11,14 @@ via_ir = false
 [profile.default.fuzz]
 runs = 256
 
+# ---- lint 取舍（forge lint）----
+[profile.default.lint]
+exclude_lints = ["asm-keccak256", "mixed-case-variable"]
+# asm-keccak256：_innerHash 刻意用 abi.encodePacked，与后端 ethers
+#   solidityPackedKeccak256 逐字节对齐的可读性优先，手写 assembly 收益极小
+#   （mint 只调一次）却容易写出与后端不一致的编码
+# mixed-case-variable：_tokenImageURIs 中的 URI 是缩写，改名反更难读
+
 # ---- Avalanche Fuji ----
 [rpc_endpoints]
 avalancheFuji = "https://api.avax-test.network/ext/bc/C/rpc"

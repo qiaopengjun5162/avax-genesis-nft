@@ -534,6 +534,8 @@ contract GenesisMintTest is Test {
         bytes memory data = bytes(input);
         uint256 len = data.length;
         require(len % 4 == 0, "bad b64 length");
+        // 仅供测试解码 tokenURI，按 base64 分组长度整除，先除不丢精度
+        // forge-lint: disable-next-line(divide-before-multiply)
         uint256 olen = (len / 4) * 3;
         if (len > 0 && data[len - 1] == "=") olen--;
         if (len > 1 && data[len - 2] == "=") olen--;
@@ -547,6 +549,8 @@ contract GenesisMintTest is Test {
             uint256 n = (a << 18) | (b << 12) | (c << 6) | d;
             if (j < olen) out[j++] = bytes1(uint8((n >> 16) & 0xFF));
             if (j < olen) out[j++] = bytes1(uint8((n >> 8) & 0xFF));
+            // n & 0xFF 必在 uint8 范围内，截断是安全的
+            // forge-lint: disable-next-line(unsafe-typecast)
             if (j < olen) out[j++] = bytes1(uint8(n & 0xFF));
         }
         return string(out);
