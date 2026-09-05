@@ -1,5 +1,6 @@
 "use client";
 
+import { formatEther } from "viem";
 import { useReadContract } from "wagmi";
 import { CONTRACT_ADDRESS, STATUS_TEXT } from "@/lib/config";
 import { genesisMintAbi } from "@/lib/abi";
@@ -34,6 +35,19 @@ export default function Home() {
     functionName: "totalSupply",
     query: poll,
   });
+  // 链上真实读：owner 调整单价 / 改最大供给时，前端不再"过期"
+  const { data: maxSupply } = useReadContract({
+    address: CONTRACT_ADDRESS,
+    abi: genesisMintAbi,
+    functionName: "MAX_SUPPLY",
+    query: poll,
+  });
+  const { data: priceWei } = useReadContract({
+    address: CONTRACT_ADDRESS,
+    abi: genesisMintAbi,
+    functionName: "price",
+    query: poll,
+  });
 
   return (
     <main className="mx-auto max-w-3xl px-4 py-10">
@@ -53,9 +67,23 @@ export default function Home() {
       </div>
 
       <div className="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Stat label="已铸" value={`${Number(totalSupply ?? 0n)} / 1000`} />
+        <Stat
+          label="已铸"
+          value={
+            maxSupply !== undefined
+              ? `${Number(totalSupply ?? 0n)} / ${Number(maxSupply)}`
+              : `${Number(totalSupply ?? 0n)} / …`
+          }
+        />
         <Stat label="状态" value={STATUS_TEXT[Number(status ?? 0n)] ?? "?"} />
-        <Stat label="价格" value="0 AVAX" />
+        <Stat
+          label="价格"
+          value={
+            priceWei != null
+              ? `${Number(formatEther(priceWei as bigint)).toString()} AVAX`
+              : "…"
+          }
+        />
         <Stat label="网络" value="Fuji 43113" />
       </div>
 
