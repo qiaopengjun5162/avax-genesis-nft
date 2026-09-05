@@ -1,4 +1,31 @@
+# Forge（合约编译/测试/cache/broadcast/ABI 临时/覆盖率）
 out/
 cache/
 broadcast/
+lcov.info
+
+# Env / 私钥 / 部署
 .env
+.env.local
+.env.*.local
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Next.js / 前端产物
+frontend/.next/
+frontend/out/
+frontend/.turbo/
+frontend/coverage/
+
+# OS / 编辑器
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# 调试 / 系统
+*.log
+core
+core.*
