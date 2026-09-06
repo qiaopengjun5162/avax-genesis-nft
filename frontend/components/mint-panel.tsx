@@ -12,7 +12,8 @@ const inputCls =
 
 /** 合约 custom error selector → 人话（cast sig 对过） */
 const REVERT_HINTS: Array<{ sel: string; hint: string }> = [
-  { sel: "0x8baa579f", hint: "签名无效：钱包不在白名单 / 签名已过期，请重试" },
+  { sel: "0x8baa579f", hint: "签名无效：钱包不在白名单 / 签名被篡改，请重试" },
+  { sel: "0x7248afc4", hint: "签名已过期：领取窗口约 1 小时，请重新点 Mint 要一个新签名" }, // SignatureExpired
   { sel: "0x900bb2c9", hint: "这张图这个钱包已经领过了（每个签名只能用一次），换一张或重新要个签名" },
   { sel: "0x06290e4e", hint: "mint 还没开始（合约 Waiting 状态）" },
   { sel: "0x8a164f63", hint: "供给已满（1000/1000）" },
@@ -38,7 +39,7 @@ type Quota = { allowlisted: boolean; limit: number; minted: number; remaining: n
  * mint 三幕剧（v3：签名按次授权，同一钱包可 mint 多张，每张可自选图）：
  *  ① 连接钱包（白名单钱包，配额 = limit 张）
  *  ② 选图：留空 = 后端分配创世图；填 URL = 自己的图
- *  ③ POST /sign → {imageURI, signature} → 调合约 mint()
+ *  ③ POST /sign → {imageURI, deadline, signature} → 调合约 mint(imageURI, deadline, signature)
  */
 export default function MintPanel() {
   const { address, isConnected, chainId } = useAccount();
@@ -107,13 +108,13 @@ export default function MintPanel() {
       setArtPreview(data.imageURI);
       setQuota({ minted: data.minted + 1, limit: data.limit, remaining: data.remaining, allowlisted: true });
 
-      // ② 带签名上链
+      // ② 带签名上链（deadline 由后端签发，签名绑定，前端原样透传）
       setBusy("mining");
       const hash = await writeContractAsync({
         address: CONTRACT_ADDRESS,
         abi: genesisMintAbi,
         functionName: "mint",
-        args: [data.imageURI, data.signature as `0x${string}`],
+        args: [data.imageURI, data.deadline as number, data.signature as `0x${string}`],
         value: 0n,
       });
       setTxHash(hash);
@@ -233,8 +234,8 @@ export default function MintPanel() {
       )}
 
       <p className="text-xs text-gray-500">
-        状态：{STATUS_TEXT.join(" / ")}。安全模型：每个签名绑定 (链+合约+钱包+图) 且只能用一次，
-        图重复/跨钱包复用都会被链上拒绝。
+        状态：{STATUS_TEXT.join(" / ")}。安全模型：每个签名绑定 (链+合约+钱包+图+过期时间) 且只能用一次，
+        图重复/跨钱包/过期复用都会被链上拒绝。
       </p>
     </div>
   );
