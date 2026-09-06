@@ -52,6 +52,7 @@ contract GenesisMint is ERC721AQueryable, Ownable, ReentrancyGuard {
     error MintPaused();
     error InvalidSignature();
     error SignatureAlreadyUsed();
+    error SignatureExpired();
     error MaxSupplyExceeded();
     error EtherAmountMismatch(uint256 required, uint256 sent);
     error RefundFailed();
@@ -82,12 +83,15 @@ contract GenesisMint is ERC721AQueryable, Ownable, ReentrancyGuard {
 
     /**
      * @dev 白名单 mint（一次一张，配额由后端签名控制）
-     * signature = signer 对 keccak(chainid, address(this), msg.sender, imageURI)
+     * signature = signer 对 keccak(chainid, address(this), msg.sender, imageURI, deadline)
      *            经 toEthSignedMessageHash 包装后的 ECDSA 签名
      * 每个签名只能用一次：同一 (钱包, 图) 想铸第二张会被 SignatureAlreadyUsed 拒绝
+     * deadline 防「永久有效签名」：白名单移除 / 私钥泄露后旧签名仍可用的风险
+     *   （后端通常给 1h 左右窗口，用户须在此窗口内完成 mint）
      */
     function mint(
         string calldata imageURI,
+        uint256 deadline,
         bytes calldata signature
     ) external payable nonReentrant returns (uint256 tokenId) {
         // 只读一次 storage（省 SLOAD）；未开始与暂停分开报错，前端能给不同提示
@@ -98,8 +102,10 @@ contract GenesisMint is ERC721AQueryable, Ownable, ReentrancyGuard {
         if (msg.value < price) revert EtherAmountMismatch(price, msg.value);
         // 空图会让 tokenURI 返回空串（市场/前端显示破图），入口直接挡掉
         if (bytes(imageURI).length == 0) revert EmptyImageURI();
+        // 0 窗口或已过期：签名作废（deadline 由签名绑定，无法被调用方篡改）
+        if (deadline == 0 || block.timestamp > deadline) revert SignatureExpired();
 
-        bytes32 inner = _innerHash(imageURI);
+        bytes32 inner = _innerHash(imageURI, deadline);
         if (usedHashes[inner]) revert SignatureAlreadyUsed();
         if (_recover(inner, signature) != signer) revert InvalidSignature();
 
@@ -155,9 +161,9 @@ contract GenesisMint is ERC721AQueryable, Ownable, ReentrancyGuard {
     // 内部
     ////////////////////////////////////////////////////////////////
 
-    function _innerHash(string calldata imageURI) internal view returns (bytes32) {
+    function _innerHash(string calldata imageURI, uint256 deadline) internal view returns (bytes32) {
         return keccak256(
-            abi.encodePacked(block.chainid, address(this), msg.sender, imageURI)
+            abi.encodePacked(block.chainid, address(this), msg.sender, imageURI, deadline)
         );
     }
 

@@ -24,6 +24,8 @@ contract GenesisMintTest is Test {
 
     uint256 public constant PRICE = 0.01 ether;
     string public constant DESC = "Genesis collection on Avalanche Fuji";
+    // 演示用「永不过期」窗口：测试里统一用这个值，真实 mint 给 now+1h 左右
+    uint256 public constant DEADLINE = 2_000_000_000;
 
     event Minted(address indexed minter, uint256 indexed tokenId, string imageURI);
     event StatusChanged(GenesisMint.Status status);
@@ -49,10 +51,11 @@ contract GenesisMintTest is Test {
     function _sign(
         uint256 pk,
         address minter,
-        string memory imageURI
+        string memory imageURI,
+        uint256 deadline
     ) internal view returns (bytes memory) {
         bytes32 inner = keccak256(
-            abi.encodePacked(block.chainid, address(nft), minter, imageURI)
+            abi.encodePacked(block.chainid, address(nft), minter, imageURI, deadline)
         );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(
             pk,
@@ -95,12 +98,12 @@ contract GenesisMintTest is Test {
 
     function test_Mint_Success() public {
         _startMint();
-        bytes memory sig = _sign(signerPk, alice, _uri(1));
+        bytes memory sig = _sign(signerPk, alice, _uri(1), DEADLINE);
 
         vm.prank(alice);
         vm.expectEmit(true, true, false, true, address(nft));
         emit Minted(alice, 0, _uri(1));
-        uint256 tokenId = nft.mint{value: PRICE}(_uri(1), sig);
+        uint256 tokenId = nft.mint{value: PRICE}(_uri(1), DEADLINE, sig);
 
         assertEq(tokenId, 0);
         assertEq(nft.balanceOf(alice), 1);
@@ -114,10 +117,10 @@ contract GenesisMintTest is Test {
         vm.prank(owner);
         nft.setPrice(0);
         _startMint();
-        bytes memory sig = _sign(signerPk, alice, _uri(2));
+        bytes memory sig = _sign(signerPk, alice, _uri(2), DEADLINE);
 
         vm.prank(alice);
-        nft.mint(_uri(2), sig);
+        nft.mint(_uri(2), DEADLINE, sig);
 
         assertEq(nft.balanceOf(alice), 1);
         assertEq(address(nft).balance, 0);
@@ -125,11 +128,11 @@ contract GenesisMintTest is Test {
 
     function test_Mint_RefundsOverpayment() public {
         _startMint();
-        bytes memory sig = _sign(signerPk, alice, _uri(3));
+        bytes memory sig = _sign(signerPk, alice, _uri(3), DEADLINE);
         uint256 aliceBefore = alice.balance;
 
         vm.prank(alice);
-        nft.mint{value: PRICE + 1 ether}(_uri(3), sig);
+        nft.mint{value: PRICE + 1 ether}(_uri(3), DEADLINE, sig);
 
         // 多付的 1 ether 原路退回
         assertEq(alice.balance, aliceBefore - PRICE);
@@ -139,9 +142,9 @@ contract GenesisMintTest is Test {
     function test_Mint_AllowsEveryWalletOnce() public {
         _startMint();
         vm.prank(alice);
-        nft.mint{value: PRICE}(_uri(10), _sign(signerPk, alice, _uri(10)));
+        nft.mint{value: PRICE}(_uri(10), DEADLINE, _sign(signerPk, alice, _uri(10), DEADLINE));
         vm.prank(bob);
-        nft.mint{value: PRICE}(_uri(11), _sign(signerPk, bob, _uri(11)));
+        nft.mint{value: PRICE}(_uri(11), DEADLINE, _sign(signerPk, bob, _uri(11), DEADLINE));
 
         assertEq(nft.totalSupply(), 2);
         assertEq(nft.balanceOf(bob), 1);
@@ -152,10 +155,10 @@ contract GenesisMintTest is Test {
     ////////////////////////////////////////////////////////////////
 
     function test_RevertWhen_MintNotStarted() public {
-        bytes memory sig = _sign(signerPk, alice, _uri(1));
+        bytes memory sig = _sign(signerPk, alice, _uri(1), DEADLINE);
         vm.prank(alice);
         vm.expectRevert(GenesisMint.MintNotStarted.selector);
-        nft.mint{value: PRICE}(_uri(1), sig);
+        nft.mint{value: PRICE}(_uri(1), DEADLINE, sig);
     }
 
     function test_RevertWhen_MintPaused() public {
@@ -166,13 +169,13 @@ contract GenesisMintTest is Test {
 
         vm.prank(alice);
         vm.expectRevert(GenesisMint.MintPaused.selector);
-        nft.mint{value: PRICE}(_uri(1), _sign(signerPk, alice, _uri(1)));
+        nft.mint{value: PRICE}(_uri(1), DEADLINE, _sign(signerPk, alice, _uri(1), DEADLINE));
 
         // 恢复后同一签名仍可用（暂停不消耗签名）
         vm.prank(owner);
         nft.setStatus(GenesisMint.Status.Started);
         vm.prank(alice);
-        nft.mint{value: PRICE}(_uri(1), _sign(signerPk, alice, _uri(1)));
+        nft.mint{value: PRICE}(_uri(1), DEADLINE, _sign(signerPk, alice, _uri(1), DEADLINE));
         assertEq(nft.balanceOf(alice), 1);
     }
 
@@ -180,11 +183,11 @@ contract GenesisMintTest is Test {
         // v3：同钱包可 mint 多张——每张不同图 = 不同签名
         _startMint();
         vm.prank(alice);
-        nft.mint{value: PRICE}(_uri(1), _sign(signerPk, alice, _uri(1)));
+        nft.mint{value: PRICE}(_uri(1), DEADLINE, _sign(signerPk, alice, _uri(1), DEADLINE));
         vm.prank(alice);
-        nft.mint{value: PRICE}(_uri(2), _sign(signerPk, alice, _uri(2)));
+        nft.mint{value: PRICE}(_uri(2), DEADLINE, _sign(signerPk, alice, _uri(2), DEADLINE));
         vm.prank(alice);
-        nft.mint{value: PRICE}(_uri(3), _sign(signerPk, alice, _uri(3)));
+        nft.mint{value: PRICE}(_uri(3), DEADLINE, _sign(signerPk, alice, _uri(3), DEADLINE));
 
         assertEq(nft.balanceOf(alice), 3);
         assertEq(nft.numberMinted(alice), 3);
@@ -192,43 +195,52 @@ contract GenesisMintTest is Test {
     }
 
     function test_RevertWhen_SameSignatureReplayed() public {
-        // 同一 (钱包, 图) 签名只能用一次 → 第二笔 SignatureAlreadyUsed
+        // 同一 (钱包, 图, deadline) 签名只能用一次 → 第二笔 SignatureAlreadyUsed
         _startMint();
-        bytes memory sig = _sign(signerPk, alice, _uri(1));
+        bytes memory sig = _sign(signerPk, alice, _uri(1), DEADLINE);
         vm.prank(alice);
-        nft.mint{value: PRICE}(_uri(1), sig);
+        nft.mint{value: PRICE}(_uri(1), DEADLINE, sig);
 
         vm.prank(alice);
         vm.expectRevert(GenesisMint.SignatureAlreadyUsed.selector);
-        nft.mint{value: PRICE}(_uri(1), sig);
+        nft.mint{value: PRICE}(_uri(1), DEADLINE, sig);
     }
 
     function test_RevertWhen_ForgedSignature() public {
         _startMint();
         // mallory 自己签（不是合法 signer）
-        bytes memory forged = _sign(malloryPk, alice, _uri(1));
+        bytes memory forged = _sign(malloryPk, alice, _uri(1), DEADLINE);
         vm.prank(alice);
         vm.expectRevert(GenesisMint.InvalidSignature.selector);
-        nft.mint{value: PRICE}(_uri(1), forged);
+        nft.mint{value: PRICE}(_uri(1), DEADLINE, forged);
     }
 
     function test_RevertWhen_ReplayAliceSigByBob() public {
         _startMint();
         // alice 的合法签名（绑定 alice 地址）
-        bytes memory sig = _sign(signerPk, alice, _uri(1));
+        bytes memory sig = _sign(signerPk, alice, _uri(1), DEADLINE);
 
         vm.prank(bob);
         vm.expectRevert(GenesisMint.InvalidSignature.selector);
-        nft.mint{value: PRICE}(_uri(1), sig);
+        nft.mint{value: PRICE}(_uri(1), DEADLINE, sig);
     }
 
     function test_RevertWhen_WrongImageInSig() public {
         _startMint();
         // 签名对应 _uri(1)，却拿 _uri(2) 来 mint
-        bytes memory sig = _sign(signerPk, alice, _uri(1));
+        bytes memory sig = _sign(signerPk, alice, _uri(1), DEADLINE);
         vm.prank(alice);
         vm.expectRevert(GenesisMint.InvalidSignature.selector);
-        nft.mint{value: PRICE}(_uri(2), sig);
+        nft.mint{value: PRICE}(_uri(2), DEADLINE, sig);
+    }
+
+    function test_RevertWhen_WrongDeadlineInSig() public {
+        // 签名用 DEADLINE，却拿 DEADLINE+1 去 mint：deadline 也是绑定项 → 验签失败
+        _startMint();
+        bytes memory sig = _sign(signerPk, alice, _uri(1), DEADLINE);
+        vm.prank(alice);
+        vm.expectRevert(GenesisMint.InvalidSignature.selector);
+        nft.mint{value: PRICE}(_uri(1), DEADLINE + 1, sig);
     }
 
     function test_RevertWhen_CrossContractReplay() public {
@@ -238,19 +250,19 @@ contract GenesisMintTest is Test {
         vm.prank(owner);
         other.setStatus(GenesisMint.Status.Started);
 
-        bytes memory sig = _sign(signerPk, alice, _uri(1));
+        bytes memory sig = _sign(signerPk, alice, _uri(1), DEADLINE);
 
         // 在 other 上重放 alice 对 nft 的签名 → 应失败（绑定 address(this)）
         vm.prank(alice);
         vm.expectRevert(GenesisMint.InvalidSignature.selector);
-        other.mint{value: PRICE}(_uri(1), sig);
+        other.mint{value: PRICE}(_uri(1), DEADLINE, sig);
     }
 
     function test_RevertWhen_CrossChainSignature() public {
         // 用另一个 chainid 签的签名 → 应失败（绑定 block.chainid）
         _startMint();
         bytes32 inner = keccak256(
-            abi.encodePacked(uint256(1), address(nft), alice, _uri(1)) // chainid=1 而非当前
+            abi.encodePacked(uint256(1), address(nft), alice, _uri(1), DEADLINE) // chainid=1 而非当前
         );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(
             signerPk,
@@ -260,7 +272,35 @@ contract GenesisMintTest is Test {
 
         vm.prank(alice);
         vm.expectRevert(GenesisMint.InvalidSignature.selector);
-        nft.mint{value: PRICE}(_uri(1), wrongChainSig);
+        nft.mint{value: PRICE}(_uri(1), DEADLINE, wrongChainSig);
+    }
+
+    function test_RevertWhen_SignatureExpired() public {
+        // deadline=0：永远过期分支（"0 窗口")
+        _startMint();
+        bytes memory sig0 = _sign(signerPk, alice, _uri(1), DEADLINE);
+        vm.prank(alice);
+        vm.expectRevert(GenesisMint.SignatureExpired.selector);
+        nft.mint{value: PRICE}(_uri(1), 0, sig0);
+
+        // 真实的过期：deadline 早于当前时间
+        vm.warp(10_000);
+        bytes memory sigPast = _sign(signerPk, alice, _uri(2), 5000); // deadline=5000 < 10000
+        vm.prank(alice);
+        vm.expectRevert(GenesisMint.SignatureExpired.selector);
+        nft.mint{value: PRICE}(_uri(2), 5000, sigPast);
+    }
+
+    function test_Mint_ExpiredSignatureCantBeReusedAfterWindow() public {
+        // 反例：合法窗口内 mint 成功后，把同一签名改个更大的 deadline 也无法重放
+        // （usedHashes 记的是 imageURI+deadline 的哈希，已消费则拒）
+        _startMint();
+        bytes memory sig = _sign(signerPk, alice, _uri(1), DEADLINE);
+        vm.prank(alice);
+        nft.mint{value: PRICE}(_uri(1), DEADLINE, sig);
+        vm.prank(alice);
+        vm.expectRevert(GenesisMint.SignatureAlreadyUsed.selector);
+        nft.mint{value: PRICE}(_uri(1), DEADLINE, sig);
     }
 
     ////////////////////////////////////////////////////////////////
@@ -269,12 +309,12 @@ contract GenesisMintTest is Test {
 
     function test_RevertWhen_Underpay() public {
         _startMint();
-        bytes memory sig = _sign(signerPk, alice, _uri(1));
+        bytes memory sig = _sign(signerPk, alice, _uri(1), DEADLINE);
         vm.prank(alice);
         vm.expectRevert(
             abi.encodeWithSelector(GenesisMint.EtherAmountMismatch.selector, PRICE, PRICE - 1)
         );
-        nft.mint{value: PRICE - 1}(_uri(1), sig);
+        nft.mint{value: PRICE - 1}(_uri(1), DEADLINE, sig);
     }
 
     function test_MaxSupplyBound() public {
@@ -285,7 +325,7 @@ contract GenesisMintTest is Test {
         vm.startPrank(alice);
         for (uint256 i = 0; i < nft.MAX_SUPPLY(); i++) {
             string memory u = _uri(1000 + i);
-            nft.mint(u, _sign(signerPk, alice, u));
+            nft.mint(u, DEADLINE, _sign(signerPk, alice, u, DEADLINE));
         }
         vm.stopPrank();
         assertEq(nft.totalSupply(), nft.MAX_SUPPLY());
@@ -293,7 +333,7 @@ contract GenesisMintTest is Test {
         // 供给已满 → 上限报错（先于签名检查触发）
         vm.prank(alice);
         vm.expectRevert(GenesisMint.MaxSupplyExceeded.selector);
-        nft.mint(_uri(5000), _sign(signerPk, alice, _uri(5000)));
+        nft.mint(_uri(5000), DEADLINE, _sign(signerPk, alice, _uri(5000), DEADLINE));
     }
 
     function test_OwnerOnly_Gating() public {
@@ -335,17 +375,17 @@ contract GenesisMintTest is Test {
         // 换 signer 后旧签名作废（用旧 signerPk 签 → revert）
         vm.prank(alice);
         vm.expectRevert(GenesisMint.InvalidSignature.selector);
-        nft.mint{value: 0.02 ether}(_uri(9), _sign(signerPk, alice, _uri(9)));
+        nft.mint{value: 0.02 ether}(_uri(9), DEADLINE, _sign(signerPk, alice, _uri(9), DEADLINE));
 
         // 新 signer 的签名生效
         vm.prank(alice);
-        nft.mint{value: 0.02 ether}(_uri(9), _sign(newSignerPk, alice, _uri(9)));
+        nft.mint{value: 0.02 ether}(_uri(9), DEADLINE, _sign(newSignerPk, alice, _uri(9), DEADLINE));
     }
 
     function test_Withdraw_OnlyOwnerMovesFunds() public {
         _startMint();
         vm.prank(alice);
-        nft.mint{value: PRICE}(_uri(1), _sign(signerPk, alice, _uri(1)));
+        nft.mint{value: PRICE}(_uri(1), DEADLINE, _sign(signerPk, alice, _uri(1), DEADLINE));
 
         // 非 owner 不能提
         vm.prank(alice);
@@ -371,11 +411,11 @@ contract GenesisMintTest is Test {
         // （前端画廊据此避免遍历 totalSupply 的 N 次 RPC）
         _startMint();
         vm.startPrank(alice);
-        nft.mint{value: PRICE}(_uri(1), _sign(signerPk, alice, _uri(1)));
-        nft.mint{value: PRICE}(_uri(2), _sign(signerPk, alice, _uri(2)));
+        nft.mint{value: PRICE}(_uri(1), DEADLINE, _sign(signerPk, alice, _uri(1), DEADLINE));
+        nft.mint{value: PRICE}(_uri(2), DEADLINE, _sign(signerPk, alice, _uri(2), DEADLINE));
         vm.stopPrank();
         vm.prank(bob);
-        nft.mint{value: PRICE}(_uri(3), _sign(signerPk, bob, _uri(3)));
+        nft.mint{value: PRICE}(_uri(3), DEADLINE, _sign(signerPk, bob, _uri(3), DEADLINE));
 
         uint256[] memory aliceIds = nft.tokensOfOwner(alice);
         assertEq(aliceIds.length, 2);
@@ -399,7 +439,7 @@ contract GenesisMintTest is Test {
         // 转给 0 地址的 call 会"成功"（无代码），钱等于永久烧掉 → 必须挡住
         _startMint();
         vm.prank(alice);
-        nft.mint{value: PRICE}(_uri(1), _sign(signerPk, alice, _uri(1)));
+        nft.mint{value: PRICE}(_uri(1), DEADLINE, _sign(signerPk, alice, _uri(1), DEADLINE));
 
         vm.prank(owner);
         vm.expectRevert(GenesisMint.ZeroAddress.selector);
@@ -419,11 +459,11 @@ contract GenesisMintTest is Test {
         Rejector rejector = new Rejector();
         vm.deal(address(rejector), 1 ether); // msg.sender 是 rejector，需有钱付
         _startMint();
-        bytes memory sig = _sign(signerPk, address(rejector), _uri(1));
+        bytes memory sig = _sign(signerPk, address(rejector), _uri(1), DEADLINE);
 
         vm.prank(address(rejector));
         vm.expectRevert(GenesisMint.RefundFailed.selector);
-        nft.mint{value: PRICE + 1}(_uri(1), sig);
+        nft.mint{value: PRICE + 1}(_uri(1), DEADLINE, sig);
 
         // 原子性：回滚后没有 NFT 被铸出
         assertEq(nft.totalSupply(), 0);
@@ -433,7 +473,7 @@ contract GenesisMintTest is Test {
     function test_RevertWhen_WithdrawToRejector() public {
         _startMint();
         vm.prank(alice);
-        nft.mint{value: PRICE}(_uri(1), _sign(signerPk, alice, _uri(1)));
+        nft.mint{value: PRICE}(_uri(1), DEADLINE, _sign(signerPk, alice, _uri(1), DEADLINE));
 
         Rejector rejector = new Rejector();
         vm.prank(owner);
@@ -449,7 +489,7 @@ contract GenesisMintTest is Test {
         _startMint();
         vm.prank(alice);
         vm.expectRevert(GenesisMint.EmptyImageURI.selector);
-        nft.mint{value: PRICE}("", _sign(signerPk, alice, ""));
+        nft.mint{value: PRICE}("", DEADLINE, _sign(signerPk, alice, "", DEADLINE));
 
         assertEq(nft.totalSupply(), 0);
     }
@@ -461,7 +501,7 @@ contract GenesisMintTest is Test {
     function test_TokenURI_ContainsOnchainJson() public {
         _startMint();
         vm.prank(alice);
-        nft.mint{value: PRICE}(_uri(7), _sign(signerPk, alice, _uri(7)));
+        nft.mint{value: PRICE}(_uri(7), DEADLINE, _sign(signerPk, alice, _uri(7), DEADLINE));
 
         string memory uri = nft.tokenURI(0);
         assertTrue(_hasPrefix(uri, "data:application/json;base64,"));
@@ -484,11 +524,11 @@ contract GenesisMintTest is Test {
     function testFuzz_Mint_PaymentAccounting(uint256 amount) public {
         _startMint();
         amount = bound(amount, PRICE, 5 ether);
-        bytes memory sig = _sign(signerPk, alice, _uri(1));
+        bytes memory sig = _sign(signerPk, alice, _uri(1), DEADLINE);
         uint256 aliceBefore = alice.balance;
 
         vm.prank(alice);
-        nft.mint{value: amount}(_uri(1), sig);
+        nft.mint{value: amount}(_uri(1), DEADLINE, sig);
 
         assertEq(address(nft).balance, PRICE);
         assertEq(alice.balance, aliceBefore - PRICE);
@@ -498,7 +538,7 @@ contract GenesisMintTest is Test {
         _startMint();
         vm.prank(alice);
         vm.expectRevert();
-        nft.mint{value: PRICE}(_uri(1), junk);
+        nft.mint{value: PRICE}(_uri(1), DEADLINE, junk);
     }
 
     ////////////////////////////////////////////////////////////////
