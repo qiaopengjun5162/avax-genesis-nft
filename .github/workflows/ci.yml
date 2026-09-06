@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 # 三个并行 job：合约 / 后端 / 前端
-# 合约与后端各自独立验证；前端只跑 type-check（不构建 Next）
+# 合约与后端各自独立验证；前端跑 type-check + eslint（不构建 Next）
 
 jobs:
   contracts:
@@ -53,7 +53,7 @@ jobs:
         run: npm test
 
   frontend:
-    name: Frontend (tsc --noEmit)
+    name: Frontend (tsc + eslint)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -70,3 +70,8 @@ jobs:
         # 仅类型检查：next build 要启 webpack + 资源构建，拉慢 CI；
         # 真正的渲染 bug 留到 PR 前的本地 next build 兜底。
         run: npx tsc --noEmit
+      - name: Lint
+        working-directory: frontend
+        # eslint-config-next（flat config）此前一直有 2 个
+        # react-hooks/set-state-in-effect 报错没人发现，正是因为它没进 CI。
+        run: npm run lint
