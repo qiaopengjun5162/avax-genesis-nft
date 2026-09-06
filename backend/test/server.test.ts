@@ -53,6 +53,7 @@ test("server: GET / 返回服务信息含合约地址", async () => {
   assert.equal(code, 200);
   assert.equal(json.service, "genesis-mint-signer");
   assert.match(json.contract, /^0x[0-9a-fA-F]{40}$/);
+  assert.match(json.protocol, /deadline/);
 });
 
 test("server: GET /healthz 返回 ok 且结构正确", async () => {

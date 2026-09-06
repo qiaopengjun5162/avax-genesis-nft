@@ -36,26 +36,33 @@ export const FUJI_RPC: string = env.FUJI_RPC?.trim() || DEFAULT_RPC;
 export function buildInnerHash(
   wallet: string,
   imageURI: string,
+  deadline: number,
   contract: string = CONTRACT_ADDRESS,
   chainId: number = FUJI_CHAIN_ID,
 ): Uint8Array {
   const inner = ethers.solidityPackedKeccak256(
-    ["uint256", "address", "address", "string"],
-    [chainId, ethers.getAddress(contract), ethers.getAddress(wallet), imageURI],
+    ["uint256", "address", "address", "string", "uint256"],
+    [chainId, ethers.getAddress(contract), ethers.getAddress(wallet), imageURI, deadline],
   );
   return ethers.getBytes(inner);
 }
 
-/** 后端签名（白名单授权） */
+/** 后端签名（白名单授权）。deadline 由后端定（默认 1h），绑定进签名防篡改 */
 export async function signMint(
   signer: ethers.Wallet,
   wallet: string,
   imageURI: string,
+  deadline: number,
 ): Promise<string> {
-  return signer.signMessage(buildInnerHash(wallet, imageURI));
+  return signer.signMessage(buildInnerHash(wallet, imageURI, deadline));
 }
 
 /** 验签：返回恢复出的地址（供自检/测试用） */
-export function recoverSigner(wallet: string, imageURI: string, signature: string): string {
-  return ethers.verifyMessage(buildInnerHash(wallet, imageURI), signature);
+export function recoverSigner(
+  wallet: string,
+  imageURI: string,
+  deadline: number,
+  signature: string,
+): string {
+  return ethers.verifyMessage(buildInnerHash(wallet, imageURI, deadline), signature);
 }

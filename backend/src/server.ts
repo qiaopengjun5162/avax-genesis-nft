@@ -60,6 +60,9 @@ const SIGN_WINDOW_MS = Number(env.SIGN_RATE_WINDOW_MS ?? 60_000);
 const signLimiter = new RateLimiter(Number(env.SIGN_RATE_LIMIT ?? 30), SIGN_WINDOW_MS);
 const allowlistLimiter = new RateLimiter(Number(env.ALLOWLIST_RATE_LIMIT ?? 60), SIGN_WINDOW_MS);
 
+/** 签名有效窗口（秒）：防永久有效签名，用户须在此窗口内完成 mint */
+const SIGN_DEADLINE_SECONDS = Number(env.SIGN_DEADLINE_SECONDS ?? 3600);
+
 function tooMany(res: ServerResponse, limiter: RateLimiter, ip: string) {
   const r = limiter.hit(ip);
   if (r.allowed) return false;
@@ -151,7 +154,7 @@ export async function handler(req: IncomingMessage, res: ServerResponse) {
         chainId: FUJI_CHAIN_ID,
         signer: signer?.address ?? null,
         allowlistCount: Object.keys(allowlist).length,
-        protocol: "EIP-191 over keccak(chainid, contract, wallet, imageURI)，每签名一次有效",
+        protocol: "EIP-191 over keccak(chainid, contract, wallet, imageURI, deadline)，每签名一次有效 + 1h 过期",
       });
     }
 
@@ -227,8 +230,9 @@ export async function handler(req: IncomingMessage, res: ServerResponse) {
         finalUri = genesisArt(addr, next);
       }
 
-      const signature = await signMint(signer, addr, finalUri);
-      const recovered = recoverSigner(addr, finalUri, signature);
+      const deadline = Math.floor(Date.now() / 1000) + SIGN_DEADLINE_SECONDS;
+      const signature = await signMint(signer, addr, finalUri, deadline);
+      const recovered = recoverSigner(addr, finalUri, deadline, signature);
       if (recovered !== signer.address) {
         return send(res, 500, { error: "self-check failed" });
       }
@@ -239,6 +243,7 @@ export async function handler(req: IncomingMessage, res: ServerResponse) {
         limit: entry.limit,
         remaining: entry.limit - minted - 1,
         imageURI: finalUri,
+        deadline,
         signature,
       });
     }
