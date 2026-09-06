@@ -136,8 +136,10 @@ npm run dev                      # → http://localhost:3000
 
 ```bash
 echo '{"0xYourWallet": {"limit": 3}}' > backend/data/allowlist.json
-# 重启 backend 才能加载新配额
+kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印重载后的钱包数）
 ```
+
+优雅关闭：服务收到 `SIGTERM` / `SIGINT` 会先停收新连接、等在途请求结束再退出（10s 超时兜底强退）。
 
 ---
 
@@ -196,10 +198,10 @@ CI 里 `contracts` job 跑 `forge build`，本地手动同步走脚本。
 
 ## 开发公约
 
-- 每个 PR 一个独立 commit 由信（commit-by-commit 改动）
+- 每个小改动一个独立 commit（commit-by-commit，便于 review 与回滚）
 - 合约改动 → 立即跑 `forge test --force` + `forge lint`
 - 后端改动 → 立即跑 `npm test`（CI mirror）
-- 前端改动 → `npx tsc --noEmit`，必要时本地 `npm run dev` 兜底
+- 前端改动 → `npx tsc --noEmit` + `npm run lint`，必要时本地 `npm run dev` 兜底
 - ABI 改动后跑 `bash script/gen-abi.sh`，提交 diff
 
 ---
