@@ -50,7 +50,7 @@ backend/              Node 22 原生 TS，零运行时依赖（仅 ethers）
   src/art.ts          创世 SVG 生成器（确定性）
   src/env.ts          .env 手写解析（支持引号/注释/export 前缀）
   src/allowlist.ts    backend/data/allowlist.json → 配额表
-  data/allowlist.json { "0xWallet": { "limit": N } }
+  data/allowlist.json { "0xWallet": { "limit": N } }（格式见 allowlist.example.json）
 
 contracts/
   src/GenesisMint.sol ERC721A + ECDSA + 自定义错误
@@ -137,9 +137,12 @@ npm run dev                      # → http://localhost:3000
 ### 3. 白名单配额
 
 ```bash
-echo '{"0xYourWallet": {"limit": 3}}' > backend/data/allowlist.json
+cp backend/data/allowlist.example.json backend/data/allowlist.json
+# 编辑 allowlist.json，把地址替换成真实钱包（key 是 checksum address）
 kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印重载后的钱包数）
 ```
+
+格式：`{ "0xWallet": { "limit": N } }`，钱包可在限额内 mint N 张（每张图必须独立签名）。
 
 优雅关闭：服务收到 `SIGTERM` / `SIGINT` 会先停收新连接、等在途请求结束再退出（10s 超时兜底强退）。
 
