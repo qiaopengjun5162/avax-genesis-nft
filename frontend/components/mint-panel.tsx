@@ -33,7 +33,14 @@ function humanizeError(e: unknown): string {
   return first.length > 160 ? `${first.slice(0, 160)}…` : first;
 }
 
-type Quota = { allowlisted: boolean; limit: number; minted: number; remaining: number };
+type Quota = {
+  allowlisted: boolean;
+  limit: number;
+  // minted/remaining 为 null 表示后端拿不到链上配额（RPC 不可达），
+  // 不要按"还有 N 张"乐观显示，按"未知"渲染 + 禁用 mint 防误签
+  minted: number | null;
+  remaining: number | null;
+};
 
 /**
  * mint 三幕剧（v3：签名按次授权，同一钱包可 mint 多张，每张可自选图）：
@@ -142,7 +149,13 @@ export default function MintPanel() {
     );
   }
 
-  const quotaDone = Boolean(quota && quota.allowlisted && quota.remaining <= 0);
+  const quotaDone = Boolean(
+    quota && quota.allowlisted && quota.remaining !== null && quota.remaining <= 0,
+  );
+  // 白名单内但 minted/remaining 都是 null（后端 fail-closed：链上配额核验失败）
+  const quotaUnknown = Boolean(
+    quota && quota.allowlisted && quota.minted === null && quota.remaining === null,
+  );
 
   return (
     <div className="space-y-4">
@@ -154,16 +167,20 @@ export default function MintPanel() {
         <div
           className={`rounded-lg px-3 py-2 text-sm ${
             quota.allowlisted
-              ? quotaDone
-                ? "bg-gray-100 text-gray-600"
-                : "bg-green-50 text-green-800"
+              ? quotaUnknown
+                ? "bg-yellow-50 text-yellow-800"
+                : quotaDone
+                  ? "bg-gray-100 text-gray-600"
+                  : "bg-green-50 text-green-800"
               : "bg-red-50 text-red-700"
           }`}
         >
           {quota.allowlisted
-            ? quotaDone
-              ? `✅ 配额已用完（${quota.minted}/${quota.limit}）——想继续可联系加配额`
-              : `✅ 在白名单：已领 ${quota.minted} / 可领 ${quota.limit} 张`
+            ? quotaUnknown
+              ? "⏳ 配额核验中（链上 RPC 不可达），稍后刷新或换节点再试"
+              : quotaDone
+                ? `✅ 配额已用完（${quota.minted}/${quota.limit}）——想继续可联系加配额`
+                : `✅ 在白名单：已领 ${quota.minted} / 可领 ${quota.limit} 张`
             : "⚠ 钱包不在白名单——签名服务会拒绝（后端 data/allowlist.json 加地址后重启）"}
         </div>
       )}
@@ -183,16 +200,18 @@ export default function MintPanel() {
 
       <button
         className={btnPrimary}
-        disabled={busy !== null || wrongChain || quotaDone}
+        disabled={busy !== null || wrongChain || quotaDone || quotaUnknown}
         onClick={onMint}
       >
         {busy === "signing"
           ? "① 向后端要签名…"
           : busy === "mining"
             ? "② 提交链上交易…"
-            : quotaDone
-              ? "配额已用完"
-              : "✨ Mint 一张 Genesis NFT"}
+            : quotaUnknown
+              ? "⏳ 链上配额核验中"
+              : quotaDone
+                ? "配额已用完"
+                : "✨ Mint 一张 Genesis NFT"}
       </button>
 
       {error && (
