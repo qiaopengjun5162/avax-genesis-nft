@@ -6,7 +6,18 @@ import {
   trustWallet,
 } from "@rainbow-me/rainbowkit/wallets";
 import { createConfig } from "wagmi";
-import { defineChain, http } from "viem";
+import { defineChain, fallback, http } from "viem";
+
+/**
+ * Fuji RPC 链：
+ *  - 主节点：NEXT_PUBLIC_RPC_URL 覆盖优先，否则走 Avalanche 官方公共节点
+ *  - fallback：再多挂一个 PublicNode，限流时 viem 自动尝试下一个
+ * 嫌公共节点不稳的：自己跑节点 / 用 Ankr-paid，把 URL 塞 NEXT_PUBLIC_RPC_URL 即可
+ * （fallback 会保留作第二跳，不是彻底替换）
+ */
+const FUJI_RPC_DEFAULT = "https://api.avax-test.network/ext/bc/C/rpc";
+const FUJI_RPC_FALLBACK = "https://avalanche-fuji-rpc.publicnode.com";
+const fujiRpcPrimary = process.env.NEXT_PUBLIC_RPC_URL?.trim() || FUJI_RPC_DEFAULT;
 
 /** Avalanche Fuji C-Chain（chainId 43113）——唯一配置的链，杜绝连到主网 */
 export const fuji = defineChain({
@@ -14,7 +25,7 @@ export const fuji = defineChain({
   name: "Avalanche Fuji",
   nativeCurrency: { name: "AVAX", symbol: "AVAX", decimals: 18 },
   rpcUrls: {
-    default: { http: ["https://api.avax-test.network/ext/bc/C/rpc"] },
+    default: { http: [fujiRpcPrimary] },
   },
   blockExplorers: {
     default: { name: "Avascan (Fuji)", url: "https://testnet.avascan.info/blockchain/c" },
@@ -49,7 +60,8 @@ export const wagmiConfig = createConfig({
   chains: [fuji],
   connectors,
   transports: {
-    [fuji.id]: http("https://api.avax-test.network/ext/bc/C/rpc"),
+    // rank:false → 按列表顺序逐个试（不按延迟动态排序，避免抖动时频繁切）
+    [fuji.id]: fallback([http(fujiRpcPrimary), http(FUJI_RPC_FALLBACK)], { rank: false }),
   },
   ssr: true, // Next.js App Router 必需
 });
