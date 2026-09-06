@@ -252,7 +252,30 @@ if (isMain && signer) {
   console.log(`   白名单  : ${Object.keys(allowlist).length} 个钱包（配额制，可多次 mint）`);
   console.log(`   监听    : http://127.0.0.1:${PORT}`);
   void selfCheck();
-  createServer((req, res) => {
+
+  const server = createServer((req, res) => {
     void handler(req, res);
-  }).listen(PORT, "127.0.0.1");
+  });
+  server.listen(PORT, "127.0.0.1");
+
+  // 优雅关闭：容器滚动更新 / Ctrl-C 时先停收新连接，等在途请求处理完
+  // 再退出——否则会掐断正在进行的 /sign。加超时兜底，避免有连接挂死
+  // 导致进程永远退不掉。
+  const SHUTDOWN_GRACE_MS = 10_000;
+  let shuttingDown = false;
+  for (const sig of ["SIGTERM", "SIGINT"] as const) {
+    process.on(sig, () => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      console.log(`\n收到 ${sig}：停止接收新请求，等待在途请求结束…`);
+      server.close(() => {
+        console.log("已优雅关闭");
+        process.exit(0);
+      });
+      setTimeout(() => {
+        console.warn(`等待超过 ${SHUTDOWN_GRACE_MS}ms，强制退出`);
+        process.exit(1);
+      }, SHUTDOWN_GRACE_MS).unref();
+    });
+  }
 }
