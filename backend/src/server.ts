@@ -17,7 +17,7 @@ import { ethers } from "ethers";
 import { env } from "./env.ts";
 import { CONTRACT_ADDRESS, FUJI_CHAIN_ID, FUJI_RPC, recoverSigner, signMint } from "./protocol.ts";
 import { genesisArt } from "./art.ts";
-import { entryFor, loadAllowlist } from "./allowlist.ts";
+import { entryFor, loadAllowlist, type Allowlist } from "./allowlist.ts";
 import { numberMintedOnChain, signerOnChain, totalSupplyOnChain } from "./chain.ts";
 import { RateLimiter, clientIp } from "./ratelimit.ts";
 
@@ -137,7 +137,20 @@ async function rpcHealth(): Promise<{ reachable: boolean; blockNumber: number | 
 }
 
 /** HTTP 请求处理（抽成可导出函数，便于不绑端口直接单测） */
-export async function handler(req: IncomingMessage, res: ServerResponse) {
+export type HandlerDeps = {
+  /** 注入链上配额读取（默认 = 真链读）；null 返回触发 fail-closed */
+  numberMintedOnChain?: (wallet: string) => Promise<number | null>;
+  /** 注入白名单（默认 = 模块级，支持 SIGHUP 热重载） */
+  allowlist?: Allowlist;
+  /** 注入签名钱包（默认 = 模块级 SIGNER_PRIVATE_KEY 派生） */
+  signer?: ethers.Wallet | null;
+};
+
+export async function handler(req: IncomingMessage, res: ServerResponse, deps: HandlerDeps = {}) {
+  const _numMinted = deps.numberMintedOnChain ?? numberMintedOnChain;
+  const _allowlist = deps.allowlist ?? allowlist;
+  // deps.signer 未传 → 用模块级；显式传 null → 视为未配置（便于测 503 分支）
+  const _signer = deps.signer === undefined ? signer : deps.signer;
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
 
   if (req.method === "OPTIONS") {
@@ -178,21 +191,36 @@ export async function handler(req: IncomingMessage, res: ServerResponse) {
     if (req.method === "GET" && alMatch) {
       if (tooMany(res, allowlistLimiter, clientIp(req))) return;
       const wallet = ethers.getAddress(alMatch[1]);
-      const entry = entryFor(wallet, allowlist);
-      const minted = entry ? await numberMintedOnChain(wallet) : 0;
+      const entry = entryFor(wallet, _allowlist);
+      // 不在白名单 → minted/remaining=0；有配额但 RPC 不可达 → null（前端按"未知"处理）
+      let mintedOut: number | null;
+      let remainingOut: number | null;
+      if (!entry) {
+        mintedOut = 0;
+        remainingOut = 0;
+      } else {
+        const m = await _numMinted(wallet);
+        if (m === null) {
+          mintedOut = null;
+          remainingOut = null;
+        } else {
+          mintedOut = m;
+          remainingOut = Math.max(0, entry.limit - m);
+        }
+      }
       return send(res, 200, {
         wallet,
         allowlisted: Boolean(entry),
         limit: entry?.limit ?? 0,
-        minted,
-        remaining: entry ? Math.max(0, entry.limit - minted) : 0,
+        minted: mintedOut,
+        remaining: remainingOut,
       });
     }
 
     // POST /sign
     if (req.method === "POST" && url.pathname === "/sign") {
       if (tooMany(res, signLimiter, clientIp(req))) return;
-      if (!signer) {
+      if (!_signer) {
         return send(res, 503, { error: "signer 未配置（缺 SIGNER_PRIVATE_KEY）" });
       }
       const body = await readBody(req);
@@ -206,10 +234,15 @@ export async function handler(req: IncomingMessage, res: ServerResponse) {
         return send(res, 400, { error: "invalid wallet address" });
       }
 
-      const entry = entryFor(addr, allowlist);
+      const entry = entryFor(addr, _allowlist);
       if (!entry) return send(res, 403, { error: "钱包不在白名单", wallet: addr });
 
-      const minted = await numberMintedOnChain(addr);
+      // fail-closed：RPC 不可达 → minted 未知，宁可拒签也不要越权签发
+      // （合约 v3 没有 per-wallet 硬上限，配额全靠后端签名把关）
+      const minted = await _numMinted(addr);
+      if (minted === null) {
+        return send(res, 503, { error: "链上配额核验失败（RPC 不可达），请稍后重试" });
+      }
       if (minted >= entry.limit) {
         return send(res, 403, {
           error: `配额已用完（${minted}/${entry.limit}）`,
@@ -231,9 +264,9 @@ export async function handler(req: IncomingMessage, res: ServerResponse) {
       }
 
       const deadline = Math.floor(Date.now() / 1000) + SIGN_DEADLINE_SECONDS;
-      const signature = await signMint(signer, addr, finalUri, deadline);
+      const signature = await signMint(_signer, addr, finalUri, deadline);
       const recovered = recoverSigner(addr, finalUri, deadline, signature);
-      if (recovered !== signer.address) {
+      if (recovered !== _signer.address) {
         return send(res, 500, { error: "self-check failed" });
       }
       console.log(`✍️  sign ${addr.slice(0, 8)}… (${minted + 1}/${entry.limit}) 图=${finalUri.slice(0, 30)}…`);

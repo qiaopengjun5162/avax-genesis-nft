@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { ethers } from "ethers";
 import { handler } from "../src/server.ts";
+import { type Allowlist } from "../src/allowlist.ts";
 import { RateLimiter, clientIp } from "../src/ratelimit.ts";
 
 /** 最小 mock：server.ts 的 handler 只用 url/method/headers + 可选异步迭代体 */
@@ -149,4 +151,90 @@ test("server: /sign 超过速率限制返回 429 + Retry-After", async () => {
   assert.equal(last.statusCode, 429); // 第 31 次（>上限 30）触发限流
   assert.ok(Number(last._headers["retry-after"]) > 0);
   assert.equal(last._headers["access-control-allow-origin"], "*");
+});
+
+// ---- fail-closed 配额核验 ----
+
+const ANVIL_KEY_0 = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+const ANVIL_ADDR_0 = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"; // anvil 演示钱包 #0（checksummed）
+
+function postSign(body: object, ip: string) {
+  const req: any = {
+    method: "POST",
+    url: "/sign",
+    headers: { host: "x" },
+    socket: { remoteAddress: ip },
+  };
+  const buf = Buffer.from(JSON.stringify(body));
+  req[Symbol.asyncIterator] = async function* () { yield buf; };
+  return req;
+}
+function getAllowlist(wallet: string, ip: string) {
+  return { method: "GET", url: `/allowlist/${wallet}`, headers: { host: "x" }, socket: { remoteAddress: ip } } as any;
+}
+
+test("server: /sign 链上配额核验失败（RPC 不可达）返回 503（fail-closed）", async () => {
+  // 合约 v3 没有 per-wallet 硬上限，配额全靠后端签名把关。
+  // 若 minted 读不到（null）还按 0 走就会无限越界。所以 fail-closed：503 + 拒签。
+  const testWallet = new ethers.Wallet(ANVIL_KEY_0);
+  const res = mockRes();
+  await handler(postSign({ wallet: ANVIL_ADDR_0 }, "1.1.1.1"), res, {
+    signer: testWallet,
+    allowlist: { [ANVIL_ADDR_0]: { limit: 3 } } as Allowlist,
+    numberMintedOnChain: async () => null,
+  });
+  assert.equal(res.statusCode, 503);
+  assert.match(res._body, /RPC 不可达|链上配额核验/);
+});
+
+test("server: /allowlist 白名单内 RPC 不可达时 minted/remaining 为 null", async () => {
+  const res = mockRes();
+  await handler(getAllowlist(ANVIL_ADDR_0, "2.2.2.2"), res, {
+    allowlist: { [ANVIL_ADDR_0]: { limit: 3 } } as Allowlist,
+    numberMintedOnChain: async () => null,
+  });
+  assert.equal(res.statusCode, 200);
+  const body = JSON.parse(res._body);
+  assert.equal(body.allowlisted, true);
+  assert.equal(body.limit, 3);
+  assert.equal(body.minted, null);   // 未知
+  assert.equal(body.remaining, null); // 未知
+});
+
+test("server: /allowlist 不在白名单时 minted/remaining 为 0（非 null）", async () => {
+  const res = mockRes();
+  await handler(getAllowlist(ANVIL_ADDR_0, "3.3.3.3"), res, {
+    allowlist: {},
+    numberMintedOnChain: async () => null, // 即便 RPC 挂也不该改变"非白名单"的语义
+  });
+  assert.equal(res.statusCode, 200);
+  const body = JSON.parse(res._body);
+  assert.equal(body.allowlisted, false);
+  assert.equal(body.limit, 0);
+  assert.equal(body.minted, 0);
+  assert.equal(body.remaining, 0);
+});
+
+test("server: /sign 注入依赖走完整流程返回签名（验证 deps 接线）", async () => {
+  // 用 user-provided imageURI 避开 totalSupplyOnChain 真链调用，保证测试离线
+  const testWallet = new ethers.Wallet(ANVIL_KEY_0);
+  const res = mockRes();
+  await handler(
+    postSign({ wallet: ANVIL_ADDR_0, imageURI: "https://example.com/x.png" }, "4.4.4.4"),
+    res,
+    {
+      signer: testWallet,
+      allowlist: { [ANVIL_ADDR_0]: { limit: 5 } } as Allowlist,
+      numberMintedOnChain: async () => 1,
+    },
+  );
+  assert.equal(res.statusCode, 200);
+  const body = JSON.parse(res._body);
+  assert.match(body.signature, /^0x[0-9a-fA-F]+$/);
+  assert.equal(body.wallet, ANVIL_ADDR_0);
+  assert.equal(body.minted, 1);
+  assert.equal(body.limit, 5);
+  assert.equal(body.remaining, 3); // 5 - 1 - 1
+  assert.equal(body.imageURI, "https://example.com/x.png");
+  assert.equal(body.deadline > Math.floor(Date.now() / 1000), true);
 });
