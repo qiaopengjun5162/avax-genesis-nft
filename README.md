@@ -10,16 +10,16 @@
 
 ## 安全模型（v3，要点）
 
-每个签名是 **一次性 + 强绑定**：
+每个签名是 **一次性 + 强绑定 + 限时**：
 
 ```
-inner = keccak256(abi.encodePacked(chainid, contract, wallet, imageURI))
+inner = keccak256(abi.encodePacked(chainid, contract, wallet, imageURI, deadline))
 final = EIP-191(inner)        // "\x19Ethereum Signed Message:\n32" 前缀
 signature = backend.sign(final)
-合约校验：recover == signer && usedHashes[hash] == false && msg.sender == wallet
+合约校验：recover == signer && usedHashes[hash] == false && block.timestamp <= deadline && msg.sender == wallet
 ```
 
-绑定 4 维 → 复用/钓鱼必被链上拒：
+绑定 5 维 → 复用/钓鱼/过期必被链上拒：
 
 | 维度 | 攻击方式 | 后果 |
 |---|---|---|
@@ -27,6 +27,7 @@ signature = backend.sign(final)
 | `contract` | 把演示实例签名用到自部署实例 | revert |
 | `wallet` | 把 alice 的签名给 bob 调 mint | revert（recovered ≠ msg.sender） |
 | `imageURI` | 同一钱包用旧图 reuse 签名 | revert（`usedHashes` 标记已用） |
+| `deadline` | 白名单移除 / 私钥泄露后旧签名一直可用 | revert（`SignatureExpired`，后端默认给 ~1h 窗口） |
 
 钱包**本身**没有"一张"的限制（v3 修正为"按配额"，每个白名单钱包可在限额内 mint 多张，每张图必须独立签名）。
 
