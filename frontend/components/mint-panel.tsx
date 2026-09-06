@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useState } from "react";
 import { useAccount, useWriteContract, useWaitForTransactionReceipt } from "wagmi";
 import { CONTRACT_ADDRESS, SIGNER_URL, STATUS_TEXT, explorerTx, FAUCET_URL } from "@/lib/config";
 import { genesisMintAbi } from "@/lib/abi";
@@ -68,16 +68,21 @@ export default function MintPanel() {
     }
   }, [address]);
 
-  useEffect(() => {
-    setQuota(null);
-    fetchQuota();
-    const t = setInterval(fetchQuota, 4000);
-    return () => clearInterval(t);
-  }, [fetchQuota]);
+  // 轮询配额（含初始拉取）。轮询属于「事件」而非「渲染同步」，
+  // 用 useEffectEvent 包一层避免被当依赖。
+  const pollQuota = useEffectEvent(() => {
+    void fetchQuota();
+  });
 
   useEffect(() => {
-    if (txOk) fetchQuota();
-  }, [txOk, fetchQuota]);
+    // 初始拉取 + 每 4s tick 的 setState 都在 await 之后（异步），
+    // 不会触发规则担心的同步级联渲染；该规则无法区分同步/异步故误报，
+    // 精确关闭此行（不关全局，保留其对真同步 bug 的检测价值）。
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    pollQuota();
+    const t = setInterval(pollQuota, 4000);
+    return () => clearInterval(t);
+  }, []);
 
   async function onMint() {
     if (!address) return;
