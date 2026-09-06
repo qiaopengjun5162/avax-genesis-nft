@@ -277,6 +277,9 @@ if (isMain && signer) {
   console.log(`   signer  : ${signer.address}`);
   console.log(`   白名单  : ${Object.keys(allowlist).length} 个钱包（配额制，可多次 mint）`);
   console.log(`   监听    : http://127.0.0.1:${PORT}`);
+  if (Object.keys(allowlist).length === 0) {
+    console.warn("⚠️  白名单为空：backend/data/allowlist.json 缺失或内容为空，所有 /sign 都会返回 403");
+  }
   void selfCheck();
 
   const server = createServer((req, res) => {
