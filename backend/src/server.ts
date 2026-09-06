@@ -19,6 +19,7 @@ import { CONTRACT_ADDRESS, FUJI_CHAIN_ID, FUJI_RPC, recoverSigner, signMint } fr
 import { genesisArt } from "./art.ts";
 import { entryFor, loadAllowlist } from "./allowlist.ts";
 import { numberMintedOnChain, signerOnChain, totalSupplyOnChain } from "./chain.ts";
+import { RateLimiter, clientIp } from "./ratelimit.ts";
 
 const PORT = Number(env.PORT ?? 8787);
 
@@ -49,6 +50,23 @@ if (signerPk) {
 }
 let allowlist = loadAllowlist();
 
+/**
+ * 匿名端点限流（防 RPC/CPU DoS）。阈值走 .env，缺省：
+ *  - /sign       每 IP 60s 内 30 次（签名要读链上 + 可能签名，重）
+ *  - /allowlist  每 IP 60s 内 60 次（只读，轻一些）
+ * 多副本部署需把这套迁到 Redis，否则各进程独立计数。
+ */
+const SIGN_WINDOW_MS = Number(env.SIGN_RATE_WINDOW_MS ?? 60_000);
+const signLimiter = new RateLimiter(Number(env.SIGN_RATE_LIMIT ?? 30), SIGN_WINDOW_MS);
+const allowlistLimiter = new RateLimiter(Number(env.ALLOWLIST_RATE_LIMIT ?? 60), SIGN_WINDOW_MS);
+
+function tooMany(res: ServerResponse, limiter: RateLimiter, ip: string) {
+  const r = limiter.hit(ip);
+  if (r.allowed) return false;
+  send(res, 429, { error: "请求过于频繁，请稍后再试" }, { "retry-after": String(r.retryAfterSec) });
+  return true;
+}
+
 /** SIGHUP 热加载白名单：改配额不必重启服务 */
 function reloadAllowlist() {
   allowlist = loadAllowlist();
@@ -61,8 +79,8 @@ const CORS = {
   "access-control-allow-headers": "content-type",
 };
 
-function send(res: ServerResponse, code: number, body: unknown) {
-  res.writeHead(code, { "content-type": "application/json; charset=utf-8", ...CORS });
+function send(res: ServerResponse, code: number, body: unknown, extra: Record<string, string> = {}) {
+  res.writeHead(code, { "content-type": "application/json; charset=utf-8", ...CORS, ...extra });
   res.end(JSON.stringify(body, null, 2));
 }
 
@@ -155,6 +173,7 @@ export async function handler(req: IncomingMessage, res: ServerResponse) {
     // GET /allowlist/:wallet —— 前端预检配额
     const alMatch = url.pathname.match(/^\/allowlist\/(0x[0-9a-fA-F]{40})$/);
     if (req.method === "GET" && alMatch) {
+      if (tooMany(res, allowlistLimiter, clientIp(req))) return;
       const wallet = ethers.getAddress(alMatch[1]);
       const entry = entryFor(wallet, allowlist);
       const minted = entry ? await numberMintedOnChain(wallet) : 0;
@@ -169,6 +188,7 @@ export async function handler(req: IncomingMessage, res: ServerResponse) {
 
     // POST /sign
     if (req.method === "POST" && url.pathname === "/sign") {
+      if (tooMany(res, signLimiter, clientIp(req))) return;
       if (!signer) {
         return send(res, 503, { error: "signer 未配置（缺 SIGNER_PRIVATE_KEY）" });
       }
