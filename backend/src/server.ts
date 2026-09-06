@@ -47,7 +47,13 @@ if (signerPk) {
   console.error("缺少 SIGNER_PRIVATE_KEY（backend/.env）");
   process.exit(1);
 }
-const allowlist = loadAllowlist();
+let allowlist = loadAllowlist();
+
+/** SIGHUP 热加载白名单：改配额不必重启服务 */
+function reloadAllowlist() {
+  allowlist = loadAllowlist();
+  console.log(`🔄 白名单已重载：${Object.keys(allowlist).length} 个钱包`);
+}
 
 const CORS = {
   "access-control-allow-origin": env.CORS_ORIGIN ?? "*",
@@ -257,6 +263,9 @@ if (isMain && signer) {
     void handler(req, res);
   });
   server.listen(PORT, "127.0.0.1");
+
+  // SIGHUP：热加载白名单，改配额不用重启（kill -HUP <pid>）
+  process.on("SIGHUP", reloadAllowlist);
 
   // 优雅关闭：容器滚动更新 / Ctrl-C 时先停收新连接，等在途请求处理完
   // 再退出——否则会掐断正在进行的 /sign。加超时兜底，避免有连接挂死
