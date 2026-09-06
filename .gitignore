@@ -29,3 +29,6 @@ frontend/coverage/
 *.log
 core
 core.*
+
+# WorkBuddy 项目内存/协作数据（非源码，不入库）
+.workbuddy/
