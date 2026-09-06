@@ -79,7 +79,7 @@ contracts/
 
 写接口：
 
-- `mint(imageURI, signature)` payable — 标准 mint
+- `mint(imageURI, deadline, signature) payable` — 标准 mint（deadline 防永久有效签名）
 - `setStatus(Status)` onlyOwner — Waiting/Started/Paused 切换
 - `setSigner(address)` onlyOwner — 注意：不能传零地址（合约层挡）
 - `setPrice(uint256)` onlyOwner
@@ -94,6 +94,7 @@ contracts/
 | `0x8a164f63` | MaxSupplyExceeded | 达到 MAX_SUPPLY |
 | `0x8baa579f` | InvalidSignature | 签名不匹配 |
 | `0x900bb2c9` | SignatureAlreadyUsed | usedHashes 命中 |
+| `0x7248afc4` | SignatureExpired | deadline 已过（后端默认给 1h 窗口） |
 | `0x9be4ff54` | EmptyImageURI | 提交空图 |
 | `0xd92e233d` | ZeroAddress | owner 配置错误 |
 | `0xc2caa2a6` | NoBalance | withdraw 时 0 余额 |
@@ -148,10 +149,10 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 
 | 层 | 工具 | 用例数 | 跑法 |
 |---|---|---|---|
-| 合约 | forge | **32** 全过 | `forge test --force` |
+| 合约 | forge | **35** 全过 | `forge test --force` |
 | 合约 lint | forge lint | 0 警告 | `forge lint` |
 | 合约覆盖率 | lcov | 100% (L/S/B/F) | `forge coverage` |
-| 后端 | node:test | **30** 全过 | `cd backend && npm test` |
+| 后端 | node:test | **39** 全过 | `cd backend && npm test` |
 | 前端 | tsc | 类型检查 | `cd frontend && npx tsc --noEmit` |
 | 前端 | eslint | 0 error | `cd frontend && npm run lint` |
 
@@ -212,6 +213,8 @@ CI 里 `contracts` job 跑 `forge build`，本地手动同步走脚本。
 - ERC721AQueryable 暴露 `tokensOfOwner`，但合约字节码变大、部署 gas 略增（只读查询免 gas）
 - ABI selector 列表写死在前端 `mint-panel.tsx`，合约定性调整时需同步（cast sig 验过）：
   `cast sig "GenesisMint.<Error>()"`
-- 公共 RPC `api.avax-test.network` 偶有限流，必要时换 Ankr / 自己节点（改 `.env` 的 `FUJI_RPC`）
+- 公共 RPC `api.avax-test.network` 偶有限流，必要时换 Ankr / 自己节点：
+  - 后端改 `.env` 的 `FUJI_RPC`
+  - 前端改 `.env.local` 的 `NEXT_PUBLIC_RPC_URL`（默认还会兜底 PublicNode，viem fallback 自动切）
 - 白名单配额是"白名单钱包×整数 limit"模型，没有到期/按 IP 维度
 - `genesisArt` 是单文件 SVG 内联（无链下资源依赖），未来如要加 PFP / 头像组件可直接后端替换
