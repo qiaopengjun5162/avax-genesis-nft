@@ -112,12 +112,21 @@ npm start                        # → http://127.0.0.1:8787
 
 启动会自检：本服务私钥 vs 链上 `signer()`，不匹配 `console.warn`（RPC 不通也降级 warn 不阻塞）。
 
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/` | 服务信息（合约 / chainId / signer / 白名单数） |
+| GET | `/healthz` | 就绪探针：`{ok, status: ok\|degraded, rpc:{reachable, blockNumber}, uptimeSec}`；RPC 3s 超时 + 15s 缓存，可被容器探针高频打而不压 RPC |
+| GET | `/allowlist/:wallet` | 查配额（allowlisted / limit / minted / remaining） |
+| POST | `/sign` | `{wallet, imageURI?}` → `{imageURI, signature, minted, limit, remaining}` |
+
+缺 `SIGNER_PRIVATE_KEY` 时直接启动失败；若仅 RPC 不通，`/healthz` 返回 `degraded` 但服务照常运行。
+
 ### 2. 前端
 
 ```bash
 cd frontend
 npm ci
-cp .env.example .env.local       # NEXT_PUBLIC_SIGNER_URL（默认 http://127.0.0.1:8787）
+cp .env.local.example .env.local  # NEXT_PUBLIC_SIGNER_URL / WC_PROJECT_ID / CONTRACT_ADDRESS
 npm run dev                      # → http://localhost:3000
 ```
 
@@ -139,8 +148,9 @@ echo '{"0xYourWallet": {"limit": 3}}' > backend/data/allowlist.json
 | 合约 | forge | **32** 全过 | `forge test --force` |
 | 合约 lint | forge lint | 0 警告 | `forge lint` |
 | 合约覆盖率 | lcov | 100% (L/S/B/F) | `forge coverage` |
-| 后端 | node:test | **24** 全过 | `cd backend && npm test` |
+| 后端 | node:test | **30** 全过 | `cd backend && npm test` |
 | 前端 | tsc | 类型检查 | `cd frontend && npx tsc --noEmit` |
+| 前端 | eslint | 0 error | `cd frontend && npm run lint` |
 
 CI：`.github/workflows/ci.yml`，push / PR 到 `main` 触发三 job 并行。
 
