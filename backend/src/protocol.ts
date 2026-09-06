@@ -16,8 +16,8 @@ import { env } from "./env.ts";
 
 export const FUJI_CHAIN_ID = 43113;
 
-// GenesisMint v3 演示实例（2026-09-04：签名按次授权，钱包可 mint 多张）
-const DEFAULT_CONTRACT = "0x7AD0921D80CeFC98889a84B960c74866A452Cc2A";
+// GenesisMint v4 演示实例（2026-09-06：签名按次授权 + deadline 过期窗口）
+const DEFAULT_CONTRACT = "0x48c9F7B4911Da705BD3285173B333b37CcB4a550";
 const DEFAULT_RPC = "https://api.avax-test.network/ext/bc/C/rpc";
 
 /**

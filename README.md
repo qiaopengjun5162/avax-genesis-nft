@@ -66,7 +66,7 @@ contracts/
 
 ---
 
-## 链上接口（已部署：Fuji 0x7AD0…Cc2A）
+## 链上接口（已部署：Fuji 0x48c9…a550）
 
 外部查询走 ABI（viem 调用 `wagmi.useReadContract`）：
 
@@ -165,7 +165,7 @@ CI：`.github/workflows/ci.yml`，push / PR 到 `main` 触发三 job 并行。
 
 ## 部署（Fuji）
 
-> demo 实例已是 v3 部署（`0x7AD0921D80CeFC98889a84B960c74866A452Cc2A`）。
+> demo 实例已是 v4/deadline 部署（`0x48c9F7B4911Da705BD3285173B333b37CcB4a550`）。
 > 重部署走脚本：
 
 ```bash
