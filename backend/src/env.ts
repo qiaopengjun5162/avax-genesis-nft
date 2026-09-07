@@ -50,4 +50,12 @@ export function loadEnv(
   return out;
 }
 
-export const env = loadEnv();
+const processEnv: Record<string, string> = Object.fromEntries(
+  Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+);
+
+/**
+ * 配置优先级：系统环境变量 > backend/.env。
+ * 这样 CI / 容器可以直接注入 SIGNER_PRIVATE_KEY，不必生成真实 .env 文件。
+ */
+export const env: Record<string, string> = { ...loadEnv(), ...processEnv };
