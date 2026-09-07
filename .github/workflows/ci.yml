@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 # 三个并行 job：合约 / 后端 / 前端
 # 合约与后端各自独立验证；前端跑 type-check + eslint（不构建 Next）
