@@ -40,6 +40,11 @@ type Quota = {
   // 不要按"还有 N 张"乐观显示，按"未知"渲染 + 禁用 mint 防误签
   minted: number | null;
   remaining: number | null;
+  /**
+   * 已签发但还没上链的张数。后端把它算进 remaining 里（防并发超额），
+   * 所以会出现「已领 0 但按钮禁用」——不显示 pending 用户会以为坏了。
+   */
+  pending?: number;
 };
 
 /**
@@ -113,7 +118,14 @@ export default function MintPanel() {
         return;
       }
       setArtPreview(data.imageURI);
-      setQuota({ minted: data.minted + 1, limit: data.limit, remaining: data.remaining, allowlisted: true });
+      // 后端返回的 remaining 已扣掉这张刚签的（含在飞的），直接用
+      setQuota({
+        minted: data.minted,
+        limit: data.limit,
+        remaining: data.remaining,
+        pending: (quota?.pending ?? 0) + 1,
+        allowlisted: true,
+      });
 
       // ② 带签名上链（deadline 由后端签发，签名绑定，前端原样透传）
       setBusy("mining");
@@ -156,6 +168,8 @@ export default function MintPanel() {
   const quotaUnknown = Boolean(
     quota && quota.allowlisted && quota.minted === null && quota.remaining === null,
   );
+  // 有签名在飞：后端预留了名额，签名过期（默认 1h）或上链后自动释放
+  const pending = quota?.pending ?? 0;
 
   return (
     <div className="space-y-4">
@@ -179,8 +193,11 @@ export default function MintPanel() {
             ? quotaUnknown
               ? "⏳ 配额核验中（链上 RPC 不可达），稍后刷新或换节点再试"
               : quotaDone
-                ? `✅ 配额已用完（${quota.minted}/${quota.limit}）——想继续可联系加配额`
-                : `✅ 在白名单：已领 ${quota.minted} / 可领 ${quota.limit} 张`
+                ? pending > 0
+                  ? `⏳ ${pending} 张签名待上链（名额已预留），上链后或 1 小时后自动释放`
+                  : `✅ 配额已用完（${quota.minted}/${quota.limit}）——想继续可联系加配额`
+                : `✅ 在白名单：已领 ${quota.minted} / 可领 ${quota.limit} 张` +
+                  (pending > 0 ? `（${pending} 张签名待上链，名额已预留）` : "")
             : "⚠ 钱包不在白名单——签名服务会拒绝（后端 data/allowlist.json 加地址后重启）"}
         </div>
       )}
