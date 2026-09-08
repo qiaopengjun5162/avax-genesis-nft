@@ -312,17 +312,21 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
       // 不在白名单 → minted/remaining=0；有配额但 RPC 不可达 → null（前端按"未知"处理）
       let mintedOut: number | null;
       let remainingOut: number | null;
+      let pendingOut = 0;
       if (!entry) {
         mintedOut = 0;
         remainingOut = 0;
       } else {
+        // 与 /sign 同一套口径：已铸 + 已签未上链 都算占用。
+        // 否则前端会显示 remaining=3，用户点下去却吃 403（有签名在飞）。
+        pendingOut = _inflight.count(wallet);
         const m = await _numMinted(wallet);
         if (m === null) {
           mintedOut = null;
           remainingOut = null;
         } else {
           mintedOut = m;
-          remainingOut = Math.max(0, entry.limit - m);
+          remainingOut = Math.max(0, entry.limit - m - pendingOut);
         }
       }
       return send(req, res, 200, {
@@ -331,9 +335,8 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
         limit: entry?.limit ?? 0,
         minted: mintedOut,
         remaining: remainingOut,
-        // 已签发但还没上链的张数：前端据此提示"有 N 张签名待上链"，
-        // 避免用户刷新后看到 remaining 没变、再点一次却吃 403 的困惑
-        pending: entry ? _inflight.count(wallet) : 0,
+        // 已签发但还没上链的张数：前端可提示"有 N 张签名待上链"
+        pending: pendingOut,
       });
     }
 

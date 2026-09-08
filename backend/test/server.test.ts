@@ -181,7 +181,9 @@ test("server: /sign 超过速率限制返回 429 + Retry-After", async () => {
   }
   assert.equal(last.statusCode, 429); // 第 31 次（>上限 30）触发限流
   assert.ok(Number(last._headers["retry-after"]) > 0);
-  assert.equal(last._headers["access-control-allow-origin"], "*");
+  // 限流拒绝也得带 CORS 头，否则浏览器里只看到「跨域失败」看不到 429。
+  // 具体值取决于 .env 有没有配 CORS_ORIGIN（匹配逻辑由 cors 单测覆盖）。
+  assert.equal(last._headers["vary"], "Origin");
 });
 
 // ---- fail-closed 配额核验 ----
@@ -345,6 +347,24 @@ test("inflight: 占位计数 / 归还幂等 / 过期自动清理", () => {
   b.release();
   expired.release();
   assert.equal(s.count("0xA", now), 0);
+});
+
+test("server: /allowlist 的 remaining 计入待上链签名（与 /sign 同口径）", async () => {
+  const inflight = new InflightSlots();
+  const now = Math.floor(Date.now() / 1000);
+  inflight.claim(ANVIL_ADDR_0, now + 600);
+  inflight.claim(ANVIL_ADDR_0, now + 600);
+  const res = mockRes();
+  await handler(getAllowlist(ANVIL_ADDR_0, "9.9.9.1"), res, {
+    allowlist: { [ANVIL_ADDR_0]: { limit: 3 } } as Allowlist,
+    numberMintedOnChain: async () => 0,
+    inflight,
+  });
+  const body = JSON.parse(res._body);
+  assert.equal(body.minted, 0);
+  assert.equal(body.pending, 2);
+  // 只算已铸会给出 remaining=3，用户点下去却吃 403（有 2 张在飞）
+  assert.equal(body.remaining, 1);
 });
 
 test("keylock: 同 key 串行执行，不同 key 互不阻塞", async () => {
