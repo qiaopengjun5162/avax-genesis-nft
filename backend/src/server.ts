@@ -163,6 +163,13 @@ const locks = new KeyedLock();
  */
 const RPC_QUERY_TIMEOUT_MS = Number(env.RPC_QUERY_TIMEOUT_MS ?? 8000);
 
+/**
+ * 是否信任反向代理带来的 X-Forwarded-For。默认 false：限流键只认真实
+ * TCP 对端（伪造不了）。部署在 Nginx / LB 后面必须设 TRUST_PROXY=1，
+ * 否则所有请求会被算成同一个 IP（一人触发限流，全场 429）。
+ */
+const TRUST_PROXY = /^(1|true|yes|on)$/i.test(env.TRUST_PROXY ?? "");
+
 async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -224,7 +231,7 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
     // GET /allowlist/:wallet —— 前端预检配额
     const alMatch = url.pathname.match(/^\/allowlist\/(0x[0-9a-fA-F]{40})$/);
     if (req.method === "GET" && alMatch) {
-      if (tooMany(res, allowlistLimiter, clientIp(req))) return;
+      if (tooMany(res, allowlistLimiter, clientIp(req, { trustProxy: TRUST_PROXY }))) return;
       const wallet = ethers.getAddress(alMatch[1]);
       const entry = entryFor(wallet, _allowlist);
       // 不在白名单 → minted/remaining=0；有配额但 RPC 不可达 → null（前端按"未知"处理）
@@ -257,7 +264,7 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
 
     // POST /sign
     if (req.method === "POST" && url.pathname === "/sign") {
-      if (tooMany(res, signLimiter, clientIp(req))) return;
+      if (tooMany(res, signLimiter, clientIp(req, { trustProxy: TRUST_PROXY }))) return;
       if (!_signer) {
         return send(res, 503, { error: "signer 未配置（缺 SIGNER_PRIVATE_KEY）" });
       }
@@ -374,6 +381,9 @@ if (isMain && signer) {
   console.log(`   signer  : ${signer.address}`);
   console.log(`   白名单  : ${Object.keys(allowlist).length} 个钱包（配额制，可多次 mint）`);
   console.log(`   监听    : http://127.0.0.1:${PORT}`);
+  console.log(
+    `   限流键  : ${TRUST_PROXY ? "X-Forwarded-For（已信任代理）" : "socket IP（反向代理后需设 TRUST_PROXY=1）"}`,
+  );
   if (Object.keys(allowlist).length === 0) {
     console.warn("⚠️  白名单为空：backend/data/allowlist.json 缺失或内容为空，所有 /sign 都会返回 403");
   }

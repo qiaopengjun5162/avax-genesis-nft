@@ -119,10 +119,19 @@ test("ratelimit: clear 后状态归零", () => {
   assert.equal(rl.hit("k").allowed, true);
 });
 
-test("ratelimit: clientIp 优先取 X-Forwarded-For 首段", () => {
-  assert.equal(clientIp({ headers: { "x-forwarded-for": "1.1.1.1, 2.2.2.2" } }), "1.1.1.1");
+test("ratelimit: clientIp 默认只用 socket 地址（XFF 可伪造，不能当限流键）", () => {
+  // X-Forwarded-For 是客户端可控请求头：每次换个值就能拿到新桶 → 限流被绕过
+  const forged = { headers: { "x-forwarded-for": "1.1.1.1, 2.2.2.2" }, socket: { remoteAddress: "9.9.9.9" } };
+  assert.equal(clientIp(forged), "9.9.9.9");
   assert.equal(clientIp({ headers: {}, socket: { remoteAddress: "3.3.3.3" } }), "3.3.3.3");
   assert.equal(clientIp({ headers: {} }), "unknown");
+});
+
+test("ratelimit: trustProxy 开启后才读 X-Forwarded-For 首段", () => {
+  const req = { headers: { "x-forwarded-for": "1.1.1.1, 2.2.2.2" }, socket: { remoteAddress: "9.9.9.9" } };
+  assert.equal(clientIp(req, { trustProxy: true }), "1.1.1.1");
+  // 开了开关但请求没带 XFF → 仍回落到 socket，不能返回空串
+  assert.equal(clientIp({ headers: {}, socket: { remoteAddress: "9.9.9.9" } }, { trustProxy: true }), "9.9.9.9");
 });
 
 // ---- 集成：/sign 超速率返回 429 ----

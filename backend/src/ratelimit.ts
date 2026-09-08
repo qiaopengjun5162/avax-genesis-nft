@@ -48,10 +48,26 @@ export class RateLimiter {
   }
 }
 
-/** 从请求里取客户端 IP：优先 X-Forwarded-For（反向代理后），否则 socket 地址 */
-export function clientIp(req: { headers: Record<string, unknown>; socket?: { remoteAddress?: string } }): string {
-  const xff = req.headers["x-forwarded-for"];
-  if (typeof xff === "string" && xff.length) return xff.split(",")[0].trim();
-  if (Array.isArray(xff) && xff.length) return String(xff[0]).trim();
+/**
+ * 取客户端 IP —— 限流的计数键，取错等于限流形同虚设。
+ *
+ * X-Forwarded-For 是**客户端可伪造**的请求头：攻击者每次换一个值就能
+ * 拿到一个全新桶，30 次/分钟的限流直接被绕过。所以默认只认 socket 地址
+ * （真实 TCP 对端，伪造不了）；只有明确声明「我前面有可信反向代理」
+ * （TRUST_PROXY=1）时才读 XFF。
+ *
+ * 代价要说清：部署在 Nginx / LB 后面却忘了开 TRUST_PROXY，所有请求都会
+ * 被算成代理那一个 IP —— 表现为「一个人触发限流，全场 429」。两个方向
+ * 都不好，但被绕过（安全）比被误杀（可用性，且日志里一眼可见）更糟。
+ */
+export function clientIp(
+  req: { headers: Record<string, unknown>; socket?: { remoteAddress?: string } },
+  opts: { trustProxy?: boolean } = {},
+): string {
+  if (opts.trustProxy) {
+    const xff = req.headers["x-forwarded-for"];
+    if (typeof xff === "string" && xff.length) return xff.split(",")[0].trim();
+    if (Array.isArray(xff) && xff.length) return String(xff[0]).trim();
+  }
   return req.socket?.remoteAddress ?? "unknown";
 }
