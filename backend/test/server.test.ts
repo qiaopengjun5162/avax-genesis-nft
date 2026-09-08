@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ethers } from "ethers";
-import { handler } from "../src/server.ts";
+import { handler, corsHeaders } from "../src/server.ts";
 import { type Allowlist } from "../src/allowlist.ts";
 import { RateLimiter, clientIp } from "../src/ratelimit.ts";
 import { InflightSlots, KeyedLock } from "../src/inflight.ts";
@@ -247,6 +247,46 @@ test("server: /sign 注入依赖走完整流程返回签名（验证 deps 接线
   assert.equal(body.remaining, 3); // 5 - 1 - 1
   assert.equal(body.imageURI, "https://example.com/x.png");
   assert.equal(body.deadline > Math.floor(Date.now() / 1000), true);
+});
+
+// ---- CORS 允许源白名单 ----
+
+test("cors: 未配置白名单时回显 *（本地开发默认）", () => {
+  const h = corsHeaders({ headers: { origin: "https://evil.example" } } as any, []);
+  assert.equal(h["access-control-allow-origin"], "*");
+});
+
+test("cors: 配了白名单就只回显命中的 origin，未命中不发 ACAO", () => {
+  const allowed = ["https://mint.example", "http://localhost:3000"];
+  const ok = corsHeaders({ headers: { origin: "https://mint.example" } } as any, allowed);
+  assert.equal(ok["access-control-allow-origin"], "https://mint.example");
+
+  const bad = corsHeaders({ headers: { origin: "https://evil.example" } } as any, allowed);
+  assert.equal(bad["access-control-allow-origin"], undefined); // 浏览器会拦掉响应
+});
+
+test("cors: 结尾斜杠与大小写不同的 origin 不被误判放行", () => {
+  const allowed = ["http://localhost:3000"];
+  // 带尾斜杠视为同一个源，回显时归一化（前端填配置时最容易多打一个 /）
+  assert.equal(
+    corsHeaders({ headers: { origin: "http://localhost:3000/" } } as any, allowed)[
+      "access-control-allow-origin"
+    ],
+    "http://localhost:3000",
+  );
+  // 缺 Origin 头（curl / 服务端调用）→ 不发 ACAO
+  assert.equal(
+    corsHeaders({ headers: {} } as any, allowed)["access-control-allow-origin"],
+    undefined,
+  );
+});
+
+test("cors: 任何分支都带 Vary: Origin（否则缓存会把 A 站的响应发给 B 站）", () => {
+  assert.equal(corsHeaders({ headers: {} } as any, [])["vary"], "Origin");
+  assert.equal(
+    corsHeaders({ headers: { origin: "https://x.example" } } as any, ["https://x.example"])["vary"],
+    "Origin",
+  );
 });
 
 // ---- in-flight 槽位 + 按钱包串行锁（防并发突破配额）----

@@ -64,10 +64,10 @@ const allowlistLimiter = new RateLimiter(Number(env.ALLOWLIST_RATE_LIMIT ?? 60),
 /** 签名有效窗口（秒）：防永久有效签名，用户须在此窗口内完成 mint */
 const SIGN_DEADLINE_SECONDS = Number(env.SIGN_DEADLINE_SECONDS ?? 3600);
 
-function tooMany(res: ServerResponse, limiter: RateLimiter, ip: string) {
+function tooMany(req: IncomingMessage, res: ServerResponse, limiter: RateLimiter, ip: string) {
   const r = limiter.hit(ip);
   if (r.allowed) return false;
-  send(res, 429, { error: "请求过于频繁，请稍后再试" }, { "retry-after": String(r.retryAfterSec) });
+  send(req, res, 429, { error: "请求过于频繁，请稍后再试" }, { "retry-after": String(r.retryAfterSec) });
   return true;
 }
 
@@ -77,14 +77,53 @@ function reloadAllowlist() {
   console.log(`🔄 白名单已重载：${Object.keys(allowlist).length} 个钱包`);
 }
 
-const CORS = {
-  "access-control-allow-origin": env.CORS_ORIGIN ?? "*",
+const CORS_METHODS = {
   "access-control-allow-methods": "GET,POST,OPTIONS",
   "access-control-allow-headers": "content-type",
 };
 
-function send(res: ServerResponse, code: number, body: unknown, extra: Record<string, string> = {}) {
-  res.writeHead(code, { "content-type": "application/json; charset=utf-8", ...CORS, ...extra });
+/**
+ * 允许的前端来源（逗号分隔）。留空 = 不限制（回显 *），本地开发方便。
+ * 一旦配置，就**只**对命中的 origin 回显 ACAO，其余一律不发这个头
+ * ——浏览器因此会拦掉响应，第三方站点读不到白名单/签名结果。
+ */
+const CORS_ALLOWED: string[] = (env.CORS_ORIGIN ?? "")
+  .split(",")
+  .map((s) => s.trim().replace(/\/$/, ""))
+  .filter(Boolean);
+
+/**
+ * 按请求 origin 计算 CORS 响应头。
+ * Vary: Origin 必须带——否则 CDN/浏览器缓存会把给 A 站的响应（含它的
+ * ACAO）发给 B 站，要么串味要么直接被拦。
+ */
+export function corsHeaders(
+  req: IncomingMessage,
+  allowed: string[] = CORS_ALLOWED,
+): Record<string, string> {
+  if (allowed.length === 0) {
+    return { ...CORS_METHODS, "access-control-allow-origin": "*", vary: "Origin" };
+  }
+  const origin = String(req.headers.origin ?? "").replace(/\/$/, "");
+  if (origin && allowed.includes(origin)) {
+    return { ...CORS_METHODS, "access-control-allow-origin": origin, vary: "Origin" };
+  }
+  // 来源不在白名单：不发 ACAO，浏览器侧自行拦截
+  return { ...CORS_METHODS, vary: "Origin" };
+}
+
+function send(
+  req: IncomingMessage,
+  res: ServerResponse,
+  code: number,
+  body: unknown,
+  extra: Record<string, string> = {},
+) {
+  res.writeHead(code, {
+    "content-type": "application/json; charset=utf-8",
+    ...corsHeaders(req),
+    ...extra,
+  });
   res.end(JSON.stringify(body, null, 2));
 }
 
@@ -196,14 +235,14 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
 
   if (req.method === "OPTIONS") {
-    res.writeHead(204, CORS);
+    res.writeHead(204, corsHeaders(req));
     return res.end();
   }
 
   try {
     // GET / 服务信息
     if (req.method === "GET" && url.pathname === "/") {
-      return send(res, 200, {
+      return send(req, res, 200, {
         service: "genesis-mint-signer",
         contract: CONTRACT_ADDRESS,
         chainId: FUJI_CHAIN_ID,
@@ -216,7 +255,7 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
     // GET /healthz 就绪探针（无鉴权）
     if (req.method === "GET" && url.pathname === "/healthz") {
       const h = await rpcHealth();
-      return send(res, 200, {
+      return send(req, res, 200, {
         ok: true,
         status: !signer ? "degraded" : h.reachable ? "ok" : "degraded",
         service: "genesis-mint-signer",
@@ -231,7 +270,7 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
     // GET /allowlist/:wallet —— 前端预检配额
     const alMatch = url.pathname.match(/^\/allowlist\/(0x[0-9a-fA-F]{40})$/);
     if (req.method === "GET" && alMatch) {
-      if (tooMany(res, allowlistLimiter, clientIp(req, { trustProxy: TRUST_PROXY }))) return;
+      if (tooMany(req, res, allowlistLimiter, clientIp(req, { trustProxy: TRUST_PROXY }))) return;
       const wallet = ethers.getAddress(alMatch[1]);
       const entry = entryFor(wallet, _allowlist);
       // 不在白名单 → minted/remaining=0；有配额但 RPC 不可达 → null（前端按"未知"处理）
@@ -250,7 +289,7 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
           remainingOut = Math.max(0, entry.limit - m);
         }
       }
-      return send(res, 200, {
+      return send(req, res, 200, {
         wallet,
         allowlisted: Boolean(entry),
         limit: entry?.limit ?? 0,
@@ -264,23 +303,23 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
 
     // POST /sign
     if (req.method === "POST" && url.pathname === "/sign") {
-      if (tooMany(res, signLimiter, clientIp(req, { trustProxy: TRUST_PROXY }))) return;
+      if (tooMany(req, res, signLimiter, clientIp(req, { trustProxy: TRUST_PROXY }))) return;
       if (!_signer) {
-        return send(res, 503, { error: "signer 未配置（缺 SIGNER_PRIVATE_KEY）" });
+        return send(req, res, 503, { error: "signer 未配置（缺 SIGNER_PRIVATE_KEY）" });
       }
       const body = await readBody(req);
       const { wallet, imageURI } = JSON.parse(body || "{}");
-      if (!wallet) return send(res, 400, { error: "missing wallet" });
+      if (!wallet) return send(req, res, 400, { error: "missing wallet" });
 
       let addr: string;
       try {
         addr = ethers.getAddress(wallet);
       } catch {
-        return send(res, 400, { error: "invalid wallet address" });
+        return send(req, res, 400, { error: "invalid wallet address" });
       }
 
       const entry = entryFor(addr, _allowlist);
-      if (!entry) return send(res, 403, { error: "钱包不在白名单", wallet: addr });
+      if (!entry) return send(req, res, 403, { error: "钱包不在白名单", wallet: addr });
 
       // 同钱包排队 + 占位：两者缺一不可。只排队不占位 → 第 2 个请求
       // 读到同一个 minted（此刻还没上链）照样签出去；只占位不排队 →
@@ -294,12 +333,12 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
           // （合约 v3 没有 per-wallet 硬上限，配额全靠后端签名把关）
           const minted = await withTimeout(_numMinted(addr), RPC_QUERY_TIMEOUT_MS);
           if (minted === null) {
-            return send(res, 503, { error: "链上配额核验失败（RPC 不可达），请稍后重试" });
+            return send(req, res, 503, { error: "链上配额核验失败（RPC 不可达），请稍后重试" });
           }
           // pending 含本次占位：已铸 + 已签未上链 > limit 就拒
           const pending = _inflight.count(addr);
           if (minted + pending > entry.limit) {
-            return send(res, 403, {
+            return send(req, res, 403, {
               error:
                 `配额已用完（已铸 ${minted}/${entry.limit}` +
                 (pending > 1 ? `，另有 ${pending - 1} 张签名待上链` : "") +
@@ -316,7 +355,7 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
           let finalUri = imageURI;
           if (imageURI !== undefined) {
             if (typeof imageURI !== "string" || !validUserImage(imageURI)) {
-              return send(res, 400, { error: "imageURI 非法：需 http(s)/ipfs/data:image 开头且 ≤500 字符" });
+              return send(req, res, 400, { error: "imageURI 非法：需 http(s)/ipfs/data:image 开头且 ≤500 字符" });
             }
           } else {
             const next = (await withTimeout(totalSupplyOnChain(), RPC_QUERY_TIMEOUT_MS)) ?? 0;
@@ -326,11 +365,11 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
           const signature = await signMint(_signer, addr, finalUri, deadline);
           const recovered = recoverSigner(addr, finalUri, deadline, signature);
           if (recovered !== _signer.address) {
-            return send(res, 500, { error: "self-check failed" });
+            return send(req, res, 500, { error: "self-check failed" });
           }
           issued = true;
           console.log(`✍️  sign ${addr.slice(0, 8)}… (${minted + pending}/${entry.limit}) 图=${finalUri.slice(0, 30)}…`);
-          return send(res, 200, {
+          return send(req, res, 200, {
             wallet: addr,
             minted,
             limit: entry.limit,
@@ -347,16 +386,16 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
       });
     }
 
-    return send(res, 404, { error: "not found" });
+    return send(req, res, 404, { error: "not found" });
   } catch (e) {
     if (e instanceof BodyTooLarge) {
-      return send(res, 413, { error: `body 超过 ${MAX_BODY_BYTES} 字节` });
+      return send(req, res, 413, { error: `body 超过 ${MAX_BODY_BYTES} 字节` });
     }
     // 前端传了坏 JSON → 客户端错误，不该记成 500
     if (e instanceof SyntaxError) {
-      return send(res, 400, { error: "body 不是合法 JSON" });
+      return send(req, res, 400, { error: "body 不是合法 JSON" });
     }
-    return send(res, 500, { error: String(e) });
+    return send(req, res, 500, { error: String(e) });
   }
 }
 
