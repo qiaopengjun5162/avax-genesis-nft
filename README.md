@@ -31,6 +31,16 @@ signature = backend.sign(final)
 
 钱包**本身**没有"一张"的限制（v3 修正为"按配额"，每个白名单钱包可在限额内 mint 多张，每张图必须独立签名）。
 
+### 配额由后端把关，因此后端自己也得扛住
+
+合约没有 per-wallet 硬上限，`limit` 全靠签名服务执行，所以这里有三道外部防线：
+
+| 防线 | 挡什么 | 实现 |
+|---|---|---|
+| 限流 | 匿名脚本刷爆 RPC / CPU | `/sign` 30 次·IP⁻¹·min⁻¹、`/allowlist` 60 次；键默认取真实 TCP 对端（`X-Forwarded-For` 可伪造，需 `TRUST_PROXY=1` 才认） |
+| fail-closed | RPC 抖动时按 `minted=0` 无限签发 | 读不到链上配额 → 503 拒签，不猜 |
+| in-flight 占位 | 连点 / 并发两个请求读到同一个 `minted`，`limit=1` 签出 2 张 | 签发前同步占位（有效期 = 签名 deadline）+ 同钱包排队；`minted + pending > limit` 即拒 |
+
 ---
 
 ## 架构
@@ -44,7 +54,9 @@ frontend/             Next.js 16 + wagmi + RainbowKit + viem
   lib/genesisMintAbi.json  ← 脚本生成（勿手改）
 
 backend/              Node 22 原生 TS，零运行时依赖（仅 ethers）
-  src/server.ts       node:http 服务（GET / + /allowlist/:w、POST /sign）
+  src/server.ts       node:http 服务（GET / + /healthz + /allowlist/:w、POST /sign）
+  src/inflight.ts     in-flight 占位 + 按钱包串行锁（防并发突破配额）
+  src/ratelimit.ts    内存固定窗口限流 + 客户端 IP 取值（TRUST_PROXY）
   src/chain.ts        链上读取（numberMinted / totalSupply / signer）
   src/protocol.ts     signMint / recoverSigner（与合约逐字节对齐）
   src/art.ts          创世 SVG 生成器（确定性）
@@ -118,8 +130,11 @@ npm start                        # → http://127.0.0.1:8787
 |---|---|---|
 | GET | `/` | 服务信息（合约 / chainId / signer / 白名单数） |
 | GET | `/healthz` | 就绪探针：`{ok, status: ok\|degraded, rpc:{reachable, blockNumber}, uptimeSec}`；RPC 3s 超时 + 15s 缓存，可被容器探针高频打而不压 RPC |
-| GET | `/allowlist/:wallet` | 查配额（allowlisted / limit / minted / remaining） |
-| POST | `/sign` | `{wallet, imageURI?}` → `{imageURI, signature, minted, limit, remaining}` |
+| GET | `/allowlist/:wallet` | 查配额（allowlisted / limit / minted / remaining / pending） |
+| POST | `/sign` | `{wallet, imageURI?}` → `{imageURI, signature, minted, limit, remaining, deadline}` |
+
+`remaining` 与 `pending`：已签发但还没上链的签名会**占用**名额（`remaining = limit - minted - pending`），
+签名过期（`SIGN_DEADLINE_SECONDS`，默认 1h）或上链后自动释放。这样前端显示的剩余数与"再点一次会不会被拒"始终一致。
 
 缺 `SIGNER_PRIVATE_KEY` 时直接启动失败；若仅 RPC 不通，`/healthz` 返回 `degraded` 但服务照常运行。
 
@@ -146,6 +161,16 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 
 优雅关闭：服务收到 `SIGTERM` / `SIGINT` 会先停收新连接、等在途请求结束再退出（10s 超时兜底强退）。
 
+### 4. 运维要点
+
+| 场景 | 做法 |
+|---|---|
+| 看请求情况 | 默认每个请求打一行 JSON：`{t, method, path, status, ms, ip, ua}`；`ACCESS_LOG=0` 可关 |
+| 部署在 Nginx / LB 后 | 必须设 `TRUST_PROXY=1`，否则限流把所有用户算成代理那一个 IP（一人触发、全场 429） |
+| 不用任何反向代理直连 | 保持 `TRUST_PROXY` 留空——`X-Forwarded-For` 是客户端可伪造的，认了它限流就形同虚设 |
+| 上线 | `CORS_ORIGIN` 填前端域名（逗号分隔多源）；留空是对全世界回显 `*` |
+| RPC 慢 / 挂 | `RPC_QUERY_TIMEOUT_MS`（默认 8s）兜底，超时按 fail-closed 走 503 拒签 |
+
 ---
 
 ## 测试
@@ -155,7 +180,7 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 | 合约 | forge | **35** 全过 | `forge test --force` |
 | 合约 lint | forge lint | 0 警告 | `forge lint` |
 | 合约覆盖率 | lcov | 100% (L/S/B/F) | `forge coverage` |
-| 后端 | node:test | **39** 全过 | `cd backend && npm test` |
+| 后端 | node:test | **51** 全过 | `cd backend && npm test` |
 | 前端 | tsc | 类型检查 | `cd frontend && npx tsc --noEmit` |
 | 前端 | eslint | 0 error | `cd frontend && npm run lint` |
 
@@ -220,4 +245,8 @@ CI 里 `contracts` job 跑 `forge build`，本地手动同步走脚本。
   - 后端改 `.env` 的 `FUJI_RPC`
   - 前端改 `.env.local` 的 `NEXT_PUBLIC_RPC_URL`（默认还会兜底 PublicNode，viem fallback 自动切）
 - 白名单配额是"白名单钱包×整数 limit"模型，没有到期/按 IP 维度
+- 限流与 in-flight 占位都在**单进程内存**里：多副本部署时各自计数（限流会放宽约 N 倍，
+  并发占位会失守），要跨副本一致得搬到 Redis
+- 签名服务是单点的：进程重启会丢失 pending 记录（未上链签名仍在用户手里且有效，
+  只是名额在那 1h 内不再被预留）——可接受，因为签名本身 1h 后就过期
 - `genesisArt` 是单文件 SVG 内联（无链下资源依赖），未来如要加 PFP / 头像组件可直接后端替换
