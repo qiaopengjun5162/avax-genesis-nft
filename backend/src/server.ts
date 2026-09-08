@@ -217,6 +217,8 @@ export type HandlerDeps = {
   allowlist?: Allowlist;
   /** 注入签名钱包（默认 = 模块级 SIGNER_PRIVATE_KEY 派生） */
   signer?: ethers.Wallet | null;
+  /** 注入总供给读取（默认 = 真链读；测试用它隔离链上状态） */
+  totalSupplyOnChain?: () => Promise<number>;
   /** 注入 in-flight 槽位（默认 = 模块级；测试用它隔离并发状态） */
   inflight?: InflightSlots;
   /** 注入按钱包串行的锁（默认 = 模块级） */
@@ -227,6 +229,30 @@ export type HandlerDeps = {
 const inflight = new InflightSlots();
 /** 同钱包 /sign 排队执行，避免并发请求同时占位后互相误判 */
 const locks = new KeyedLock();
+
+/** 已分配过的最大图序号（进程内水位线，只增不减） */
+let lastArtIndex = -1;
+
+/**
+ * 下一个创世图序号。
+ *
+ * 不能直接用 totalSupply：同一钱包在第一张上链之前再签一次，链上
+ * totalSupply 还没变，两次会算出同一个序号 → genesisArt(钱包, 序号)
+ * 完全相同 → 同一张 data URI。合约按 (wallet, imageURI) 去重，第二张
+ * mint 必然撞 SignatureAlreadyUsed，白签一次还看不出原因。
+ *
+ * 取 max(链上总量, 水位线+1)：既跟得上链上进度，又保证本进程内严格递增。
+ */
+export function nextArtIndex(totalSupply: number): number {
+  const next = Math.max(totalSupply, lastArtIndex + 1);
+  lastArtIndex = next;
+  return next;
+}
+
+/** 测试用：把水位线归零 */
+export function resetArtIndex(): void {
+  lastArtIndex = -1;
+}
 
 /**
  * 链上读取的兜底超时。没有它，RPC 挂起会把请求吊住——
@@ -265,6 +291,7 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
   const _signer = deps.signer === undefined ? signer : deps.signer;
   const _inflight = deps.inflight ?? inflight;
   const _locks = deps.locks ?? locks;
+  const _totalSupply = deps.totalSupplyOnChain ?? totalSupplyOnChain;
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   reqStart.set(req, Date.now());
 
@@ -397,8 +424,8 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
               return send(req, res, 400, { error: "imageURI 非法：需 http(s)/ipfs/data:image 开头且 ≤500 字符" });
             }
           } else {
-            const next = (await withTimeout(totalSupplyOnChain(), RPC_QUERY_TIMEOUT_MS)) ?? 0;
-            finalUri = genesisArt(addr, next);
+            const supply = (await withTimeout(_totalSupply(), RPC_QUERY_TIMEOUT_MS)) ?? 0;
+            finalUri = genesisArt(addr, nextArtIndex(supply));
           }
 
           const signature = await signMint(_signer, addr, finalUri, deadline);

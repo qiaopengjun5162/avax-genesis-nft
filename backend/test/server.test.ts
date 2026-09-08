@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ethers } from "ethers";
-import { handler, corsHeaders, formatAccessLog } from "../src/server.ts";
+import { handler, corsHeaders, formatAccessLog, nextArtIndex, resetArtIndex } from "../src/server.ts";
 import { type Allowlist } from "../src/allowlist.ts";
 import { RateLimiter, clientIp } from "../src/ratelimit.ts";
 import { InflightSlots, KeyedLock } from "../src/inflight.ts";
@@ -287,6 +287,46 @@ test("accesslog: 结构化一行日志（去 query / UA 裁剪 / 含耗时）", 
   assert.equal(line.ip, "1.2.3.4");
   assert.equal(line.ua.length, 120); // 超长 UA 只留前 120 字符
   assert.doesNotThrow(() => JSON.stringify(line));
+});
+
+// ---- 创世图序号（防同钱包连签撞同一张图）----
+
+test("artIndex: 链上总量不动时也严格递增", () => {
+  // 同一钱包在第一张上链前再签一次：totalSupply 还是 0，
+  // 若直接拿 totalSupply 当序号，两次都是 0 → 同一张 data URI →
+  // 第二张 mint 必撞 SignatureAlreadyUsed。
+  resetArtIndex();
+  assert.equal(nextArtIndex(0), 0);
+  assert.equal(nextArtIndex(0), 1);
+  assert.equal(nextArtIndex(0), 2);
+  // 链上追上来后（前几张已铸），接着链上走，不回退
+  assert.equal(nextArtIndex(3), 3);
+  assert.equal(nextArtIndex(3), 4);
+  resetArtIndex();
+});
+
+test("server: 同一钱包连签两次（都未上链）拿到两张不同的图", async () => {
+  // 端到端验证上面那条：不传 imageURI → 后端自动分配创世图
+  const inflight = new InflightSlots();
+  const w = new ethers.Wallet(ANVIL_KEY_0);
+  const deps = {
+    signer: w,
+    allowlist: { [ANVIL_ADDR_0]: { limit: 3 } } as Allowlist,
+    numberMintedOnChain: async () => 0,
+    totalSupplyOnChain: async () => 0, // 两张都还没上链，链上总量纹丝不动
+    inflight,
+  };
+  const r1 = mockRes();
+  await handler(postSign({ wallet: ANVIL_ADDR_0 }, "11.11.11.1"), r1, deps);
+  const r2 = mockRes();
+  await handler(postSign({ wallet: ANVIL_ADDR_0 }, "11.11.11.2"), r2, deps);
+  assert.equal(r1.statusCode, 200);
+  assert.equal(r2.statusCode, 200);
+  const u1 = JSON.parse(r1._body).imageURI;
+  const u2 = JSON.parse(r2._body).imageURI;
+  assert.match(u1, /^data:image\/svg\+xml;base64,/);
+  assert.notEqual(u1, u2); // 相同 = 第二张必然作废
+  resetArtIndex();
 });
 
 // ---- CORS 允许源白名单 ----
