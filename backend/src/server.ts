@@ -20,6 +20,7 @@ import { genesisArt } from "./art.ts";
 import { entryFor, loadAllowlist, type Allowlist } from "./allowlist.ts";
 import { numberMintedOnChain, signerOnChain, totalSupplyOnChain } from "./chain.ts";
 import { RateLimiter, clientIp } from "./ratelimit.ts";
+import { InflightSlots, KeyedLock } from "./inflight.ts";
 
 const PORT = Number(env.PORT ?? 8787);
 
@@ -144,13 +145,47 @@ export type HandlerDeps = {
   allowlist?: Allowlist;
   /** 注入签名钱包（默认 = 模块级 SIGNER_PRIVATE_KEY 派生） */
   signer?: ethers.Wallet | null;
+  /** 注入 in-flight 槽位（默认 = 模块级；测试用它隔离并发状态） */
+  inflight?: InflightSlots;
+  /** 注入按钱包串行的锁（默认 = 模块级） */
+  locks?: KeyedLock;
 };
+
+/** 已签发未上链的签名槽位：防并发突破配额（见 inflight.ts） */
+const inflight = new InflightSlots();
+/** 同钱包 /sign 排队执行，避免并发请求同时占位后互相误判 */
+const locks = new KeyedLock();
+
+/**
+ * 链上读取的兜底超时。没有它，RPC 挂起会把请求吊住——
+ * 现在还多了一层影响：同钱包的锁会被一直占着，后续 /sign 全排队等死。
+ * 超时 → null → 走既有的 fail-closed 分支（503）。
+ */
+const RPC_QUERY_TIMEOUT_MS = Number(env.RPC_QUERY_TIMEOUT_MS ?? 8000);
+
+async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      p,
+      new Promise<null>((r) => {
+        timer = setTimeout(() => r(null), ms);
+        // 别让定时器把进程拖住不退出
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 export async function handler(req: IncomingMessage, res: ServerResponse, deps: HandlerDeps = {}) {
   const _numMinted = deps.numberMintedOnChain ?? numberMintedOnChain;
   const _allowlist = deps.allowlist ?? allowlist;
   // deps.signer 未传 → 用模块级；显式传 null → 视为未配置（便于测 503 分支）
   const _signer = deps.signer === undefined ? signer : deps.signer;
+  const _inflight = deps.inflight ?? inflight;
+  const _locks = deps.locks ?? locks;
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
 
   if (req.method === "OPTIONS") {
@@ -214,6 +249,9 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
         limit: entry?.limit ?? 0,
         minted: mintedOut,
         remaining: remainingOut,
+        // 已签发但还没上链的张数：前端据此提示"有 N 张签名待上链"，
+        // 避免用户刷新后看到 remaining 没变、再点一次却吃 403 的困惑
+        pending: entry ? _inflight.count(wallet) : 0,
       });
     }
 
@@ -237,47 +275,68 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
       const entry = entryFor(addr, _allowlist);
       if (!entry) return send(res, 403, { error: "钱包不在白名单", wallet: addr });
 
-      // fail-closed：RPC 不可达 → minted 未知，宁可拒签也不要越权签发
-      // （合约 v3 没有 per-wallet 硬上限，配额全靠后端签名把关）
-      const minted = await _numMinted(addr);
-      if (minted === null) {
-        return send(res, 503, { error: "链上配额核验失败（RPC 不可达），请稍后重试" });
-      }
-      if (minted >= entry.limit) {
-        return send(res, 403, {
-          error: `配额已用完（${minted}/${entry.limit}）`,
-          wallet: addr,
-          minted,
-          limit: entry.limit,
-        });
-      }
-
-      // 图：用户自选 or 后端按下一 tokenId 分配创世图（全局唯一序号）
-      let finalUri = imageURI;
-      if (imageURI !== undefined) {
-        if (typeof imageURI !== "string" || !validUserImage(imageURI)) {
-          return send(res, 400, { error: "imageURI 非法：需 http(s)/ipfs/data:image 开头且 ≤500 字符" });
-        }
-      } else {
-        const next = await totalSupplyOnChain();
-        finalUri = genesisArt(addr, next);
-      }
-
+      // 同钱包排队 + 占位：两者缺一不可。只排队不占位 → 第 2 个请求
+      // 读到同一个 minted（此刻还没上链）照样签出去；只占位不排队 →
+      // 两个请求同时占位、各自数到 pending=2，双双被拒。
       const deadline = Math.floor(Date.now() / 1000) + SIGN_DEADLINE_SECONDS;
-      const signature = await signMint(_signer, addr, finalUri, deadline);
-      const recovered = recoverSigner(addr, finalUri, deadline, signature);
-      if (recovered !== _signer.address) {
-        return send(res, 500, { error: "self-check failed" });
-      }
-      console.log(`✍️  sign ${addr.slice(0, 8)}… (${minted + 1}/${entry.limit}) 图=${finalUri.slice(0, 30)}…`);
-      return send(res, 200, {
-        wallet: addr,
-        minted,
-        limit: entry.limit,
-        remaining: entry.limit - minted - 1,
-        imageURI: finalUri,
-        deadline,
-        signature,
+      return await _locks.run(addr, async () => {
+        const slot = _inflight.claim(addr, deadline);
+        let issued = false;
+        try {
+          // fail-closed：RPC 不可达 / 查询超时 → minted 未知，宁可拒签也不要越权签发
+          // （合约 v3 没有 per-wallet 硬上限，配额全靠后端签名把关）
+          const minted = await withTimeout(_numMinted(addr), RPC_QUERY_TIMEOUT_MS);
+          if (minted === null) {
+            return send(res, 503, { error: "链上配额核验失败（RPC 不可达），请稍后重试" });
+          }
+          // pending 含本次占位：已铸 + 已签未上链 > limit 就拒
+          const pending = _inflight.count(addr);
+          if (minted + pending > entry.limit) {
+            return send(res, 403, {
+              error:
+                `配额已用完（已铸 ${minted}/${entry.limit}` +
+                (pending > 1 ? `，另有 ${pending - 1} 张签名待上链` : "") +
+                "）",
+              wallet: addr,
+              minted,
+              limit: entry.limit,
+              pending: pending - 1,
+              remaining: 0,
+            });
+          }
+
+          // 图：用户自选 or 后端按下一 tokenId 分配创世图（全局唯一序号）
+          let finalUri = imageURI;
+          if (imageURI !== undefined) {
+            if (typeof imageURI !== "string" || !validUserImage(imageURI)) {
+              return send(res, 400, { error: "imageURI 非法：需 http(s)/ipfs/data:image 开头且 ≤500 字符" });
+            }
+          } else {
+            const next = (await withTimeout(totalSupplyOnChain(), RPC_QUERY_TIMEOUT_MS)) ?? 0;
+            finalUri = genesisArt(addr, next);
+          }
+
+          const signature = await signMint(_signer, addr, finalUri, deadline);
+          const recovered = recoverSigner(addr, finalUri, deadline, signature);
+          if (recovered !== _signer.address) {
+            return send(res, 500, { error: "self-check failed" });
+          }
+          issued = true;
+          console.log(`✍️  sign ${addr.slice(0, 8)}… (${minted + pending}/${entry.limit}) 图=${finalUri.slice(0, 30)}…`);
+          return send(res, 200, {
+            wallet: addr,
+            minted,
+            limit: entry.limit,
+            remaining: Math.max(0, entry.limit - minted - pending),
+            imageURI: finalUri,
+            deadline,
+            signature,
+          });
+        } finally {
+          // 被拒 / 报错 / RPC 不可达都归还占位，不误伤正常重试；
+          // 签发成功则保留到 deadline（签名过期自动释放）
+          if (!issued) slot.release();
+        }
       });
     }
 

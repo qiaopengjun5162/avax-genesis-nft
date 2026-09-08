@@ -4,6 +4,7 @@ import { ethers } from "ethers";
 import { handler } from "../src/server.ts";
 import { type Allowlist } from "../src/allowlist.ts";
 import { RateLimiter, clientIp } from "../src/ratelimit.ts";
+import { InflightSlots, KeyedLock } from "../src/inflight.ts";
 
 /** 最小 mock：server.ts 的 handler 只用 url/method/headers + 可选异步迭代体 */
 function mockReq(method: string, path: string, body?: string) {
@@ -237,4 +238,113 @@ test("server: /sign 注入依赖走完整流程返回签名（验证 deps 接线
   assert.equal(body.remaining, 3); // 5 - 1 - 1
   assert.equal(body.imageURI, "https://example.com/x.png");
   assert.equal(body.deadline > Math.floor(Date.now() / 1000), true);
+});
+
+// ---- in-flight 槽位 + 按钱包串行锁（防并发突破配额）----
+
+test("inflight: 占位计数 / 归还幂等 / 过期自动清理", () => {
+  const s = new InflightSlots();
+  const now = Math.floor(Date.now() / 1000);
+  const a = s.claim("0xA", now + 60);
+  const b = s.claim("0xA", now + 60);
+  assert.equal(s.count("0xA", now), 2);
+  a.release();
+  assert.equal(s.count("0xA", now), 1);
+  a.release(); // 幂等：重复归还不能再减
+  assert.equal(s.count("0xA", now), 1);
+
+  const expired = s.claim("0xA", now - 1); // 已经过期的签名
+  assert.equal(s.count("0xA", now), 1); // 过期的那个不计数
+  b.release();
+  expired.release();
+  assert.equal(s.count("0xA", now), 0);
+});
+
+test("keylock: 同 key 串行执行，不同 key 互不阻塞", async () => {
+  const lk = new KeyedLock();
+  const order: string[] = [];
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+  const p1 = lk.run("a", async () => {
+    order.push("a1-start");
+    await sleep(20);
+    order.push("a1-end");
+  });
+  const p2 = lk.run("a", async () => {
+    order.push("a2");
+  });
+  const p3 = lk.run("b", async () => {
+    order.push("b1");
+  });
+  await Promise.all([p1, p2, p3]);
+  // b 不排队（不同 key）；a2 必须等 a1 跑完
+  assert.deepEqual(order, ["a1-start", "b1", "a1-end", "a2"]);
+});
+
+test("server: limit=1 时并发两个 /sign 只签得出一个（in-flight 占位生效）", async () => {
+  // 没有占位的话：两个请求都读到 minted=0（此刻都还没上链）→ 都能签出
+  // → limit=1 实际 mint 出 2 张，配额被绕过。
+  const inflight = new InflightSlots();
+  const locks = new KeyedLock();
+  const w = new ethers.Wallet(ANVIL_KEY_0);
+  let open = () => {};
+  const gate = new Promise<void>((r) => {
+    open = r;
+  });
+  const deps = {
+    signer: w,
+    allowlist: { [ANVIL_ADDR_0]: { limit: 1 } } as Allowlist,
+    // 卡在 RPC 上，制造两个请求同时在飞的窗口
+    numberMintedOnChain: async () => {
+      await gate;
+      return 0;
+    },
+    inflight,
+    locks,
+  };
+  const r1 = mockRes();
+  const r2 = mockRes();
+  const p1 = handler(
+    postSign({ wallet: ANVIL_ADDR_0, imageURI: "https://example.com/a.png" }, "7.7.7.1"),
+    r1,
+    deps,
+  );
+  const p2 = handler(
+    postSign({ wallet: ANVIL_ADDR_0, imageURI: "https://example.com/b.png" }, "7.7.7.2"),
+    r2,
+    deps,
+  );
+  open();
+  await Promise.all([p1, p2]);
+  assert.deepEqual([r1.statusCode, r2.statusCode].sort(), [200, 403]);
+  // 签发成功那张保留占位（签名在 deadline 内仍可用），被拒的已归还
+  assert.equal(inflight.count(ANVIL_ADDR_0), 1);
+});
+
+test("server: /sign 失败路径归还 in-flight 占位，重试不受影响", async () => {
+  const inflight = new InflightSlots();
+  const w = new ethers.Wallet(ANVIL_KEY_0);
+  const deps = (nm: () => Promise<number | null>) => ({
+    signer: w,
+    allowlist: { [ANVIL_ADDR_0]: { limit: 1 } } as Allowlist,
+    numberMintedOnChain: nm,
+    inflight,
+  });
+  // 第一次：RPC 不可达 → 503。占位必须归还，否则这个钱包永久签不了
+  const r1 = mockRes();
+  await handler(
+    postSign({ wallet: ANVIL_ADDR_0, imageURI: "https://example.com/a.png" }, "8.8.8.1"),
+    r1,
+    deps(async () => null),
+  );
+  assert.equal(r1.statusCode, 503);
+  assert.equal(inflight.count(ANVIL_ADDR_0), 0);
+
+  // 第二次：RPC 恢复 → 正常签出
+  const r2 = mockRes();
+  await handler(
+    postSign({ wallet: ANVIL_ADDR_0, imageURI: "https://example.com/a.png" }, "8.8.8.2"),
+    r2,
+    deps(async () => 0),
+  );
+  assert.equal(r2.statusCode, 200);
 });
