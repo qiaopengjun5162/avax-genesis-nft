@@ -112,6 +112,36 @@ export function corsHeaders(
   return { ...CORS_METHODS, vary: "Origin" };
 }
 
+/** 请求开始时间（WeakMap：请求对象回收即释放，不会随请求数膨胀） */
+const reqStart = new WeakMap<IncomingMessage, number>();
+
+/** 访问日志开关（默认开；设 ACCESS_LOG=0 关） */
+const ACCESS_LOG = !/^(0|false|no|off)$/i.test(env.ACCESS_LOG ?? "1");
+
+/**
+ * 一行 JSON 一条请求：排障时最想要的四件套 method/path/status/ms，
+ * 加上 ip 与裁剪过的 UA（看得出是脚本在刷还是真人在点）。
+ * 4xx/5xx 不额外打堆栈——那是 error 日志的活，这里只留可聚合的结构。
+ */
+export function formatAccessLog(req: IncomingMessage, code: number, ms: number) {
+  return {
+    t: new Date().toISOString(),
+    method: req.method ?? "-",
+    // 去掉 query：里面可能带签名/图片参数，日志里没必要留
+    path: (req.url ?? "/").split("?")[0],
+    status: code,
+    ms,
+    ip: clientIp(req, { trustProxy: TRUST_PROXY }),
+    ua: String(req.headers["user-agent"] ?? "").slice(0, 120),
+  };
+}
+
+function accessLog(req: IncomingMessage, code: number) {
+  // 只在真实服务进程里打：单测 import 进来不该刷屏
+  if (!ACCESS_LOG || !isMain) return;
+  console.log(JSON.stringify(formatAccessLog(req, code, Date.now() - (reqStart.get(req) ?? Date.now()))));
+}
+
 function send(
   req: IncomingMessage,
   res: ServerResponse,
@@ -125,19 +155,22 @@ function send(
     ...extra,
   });
   res.end(JSON.stringify(body, null, 2));
+  accessLog(req, code);
 }
 
-/** 读请求体并卡死上限：超限立刻断开，不继续收完剩下的字节 */
+/**
+ * 读请求体并卡死上限：超限立刻停收。
+ * 注意不能在这里 destroy —— 一销毁 socket，后面写的 413 就发不出去了，
+ * 客户端只看到连接被掐断（curl: empty reply）。改成抛错由 catch 统一处理：
+ * 先把 413 写完，再排空剩余字节。
+ */
 export async function readBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     const buf = chunk as Buffer;
     size += buf.length;
-    if (size > MAX_BODY_BYTES) {
-      req.destroy();
-      throw new BodyTooLarge();
-    }
+    if (size > MAX_BODY_BYTES) throw new BodyTooLarge();
     chunks.push(buf);
   }
   return Buffer.concat(chunks).toString("utf8");
@@ -233,10 +266,13 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
   const _inflight = deps.inflight ?? inflight;
   const _locks = deps.locks ?? locks;
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
+  reqStart.set(req, Date.now());
 
   if (req.method === "OPTIONS") {
     res.writeHead(204, corsHeaders(req));
-    return res.end();
+    res.end();
+    accessLog(req, 204);
+    return;
   }
 
   try {
@@ -389,7 +425,10 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
     return send(req, res, 404, { error: "not found" });
   } catch (e) {
     if (e instanceof BodyTooLarge) {
-      return send(req, res, 413, { error: `body 超过 ${MAX_BODY_BYTES} 字节` });
+      // 顺序要紧：先回 413，再排空剩余 body（不排空连接会挂着不回收）
+      send(req, res, 413, { error: `body 超过 ${MAX_BODY_BYTES} 字节` });
+      req.resume();
+      return;
     }
     // 前端传了坏 JSON → 客户端错误，不该记成 500
     if (e instanceof SyntaxError) {

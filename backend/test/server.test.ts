@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ethers } from "ethers";
-import { handler, corsHeaders } from "../src/server.ts";
+import { handler, corsHeaders, formatAccessLog } from "../src/server.ts";
 import { type Allowlist } from "../src/allowlist.ts";
 import { RateLimiter, clientIp } from "../src/ratelimit.ts";
 import { InflightSlots, KeyedLock } from "../src/inflight.ts";
@@ -89,6 +89,27 @@ test("server: POST /sign 缺 wallet 返回 400", async () => {
   const { code, json } = await call("POST", "/sign", JSON.stringify({}));
   assert.equal(code, 400);
   assert.match(json.error, /wallet/);
+});
+
+test("server: POST /sign 超大 body 返回 413（且不能掐断连接）", async () => {
+  // 曾经在这里 req.destroy()：socket 一销毁，413 根本发不出去，
+  // 客户端只看到连接被重置。现在改成「先回 413，再排空剩余 body」。
+  const big = "a".repeat(9 * 1024); // > MAX_BODY_BYTES(8KB)
+  const req: any = { method: "POST", url: "/sign", headers: { host: "x" }, socket: { remoteAddress: "5.5.5.9" } };
+  let resumed = false;
+  req.resume = () => {
+    resumed = true;
+    return req;
+  };
+  const buf = Buffer.from(big);
+  req[Symbol.asyncIterator] = async function* () {
+    yield buf;
+  };
+  const res = mockRes();
+  await handler(req, res);
+  assert.equal(res.statusCode, 413);
+  assert.match(res._body, /body 超过/);
+  assert.equal(resumed, true); // 剩余字节必须排空，否则连接挂死
 });
 
 // ---- RateLimiter 单元 ----
@@ -247,6 +268,23 @@ test("server: /sign 注入依赖走完整流程返回签名（验证 deps 接线
   assert.equal(body.remaining, 3); // 5 - 1 - 1
   assert.equal(body.imageURI, "https://example.com/x.png");
   assert.equal(body.deadline > Math.floor(Date.now() / 1000), true);
+});
+
+test("accesslog: 结构化一行日志（去 query / UA 裁剪 / 含耗时）", () => {
+  const req = {
+    method: "POST",
+    url: "/sign?sig=0xdeadbeef&x=1",
+    headers: { host: "h", "user-agent": "U".repeat(300) },
+    socket: { remoteAddress: "1.2.3.4" },
+  } as any;
+  const line = formatAccessLog(req, 200, 42);
+  assert.equal(line.method, "POST");
+  assert.equal(line.path, "/sign"); // query 里的签名不该进日志
+  assert.equal(line.status, 200);
+  assert.equal(line.ms, 42);
+  assert.equal(line.ip, "1.2.3.4");
+  assert.equal(line.ua.length, 120); // 超长 UA 只留前 120 字符
+  assert.doesNotThrow(() => JSON.stringify(line));
 });
 
 // ---- CORS 允许源白名单 ----
