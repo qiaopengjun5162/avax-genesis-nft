@@ -89,7 +89,7 @@ export default function Home() {
 
       <section className="mb-10 rounded-2xl border border-gray-200 p-6">
         <h2 className="mb-4 text-lg font-semibold">Mint</h2>
-        <MintPanel priceWei={typeof priceWei === "bigint" ? priceWei : 0n} />
+        <MintPanel priceWei={typeof priceWei === "bigint" ? priceWei : 0n} priceReady={priceWei !== undefined} />
       </section>
 
       <Gallery />

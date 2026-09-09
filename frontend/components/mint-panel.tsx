@@ -70,7 +70,7 @@ function fmtExpiry(sec: number | null | undefined): string {
  *  ② 选图：留空 = 后端分配创世图；填 URL = 自己的图
  *  ③ POST /sign → {imageURI, deadline, signature} → 调合约 mint(imageURI, deadline, signature)
  */
-export default function MintPanel({ priceWei = 0n }: { priceWei?: bigint }) {
+export default function MintPanel({ priceWei = 0n, priceReady = false }: { priceWei?: bigint; priceReady?: boolean }) {
   const { address, isConnected, chainId } = useAccount();
   const { writeContractAsync } = useWriteContract();
 
@@ -255,6 +255,12 @@ export default function MintPanel({ priceWei = 0n }: { priceWei?: bigint }) {
         </p>
       )}
 
+      {!priceReady && !backendDown && (
+        <p className="rounded-lg bg-yellow-50 p-3 text-sm text-yellow-800">
+          ⏳ 正在读取合约价格（owner 可能设了单价），完成后即可 mint。
+        </p>
+      )}
+
       {quota && (
         <div
           className={`rounded-lg px-3 py-2 text-sm ${
@@ -299,15 +305,17 @@ export default function MintPanel({ priceWei = 0n }: { priceWei?: bigint }) {
 
       <button
         className={btnPrimary}
-        disabled={busy !== null || wrongChain || quotaDone || quotaUnknown || quotaExpired || backendDown}
+        disabled={busy !== null || wrongChain || quotaDone || quotaUnknown || quotaExpired || backendDown || !priceReady}
         onClick={onMint}
       >
         {busy === "signing"
           ? "① 向后端要签名…"
           : busy === "mining"
             ? "② 提交链上交易…"
-            : backendDown
+              : backendDown
               ? "⏳ 签名服务不可用"
+              : !priceReady
+              ? "⏳ 读取价格中…"
               : quotaExpired
                 ? "⌛ 资格已过期"
                 : quotaUnknown
