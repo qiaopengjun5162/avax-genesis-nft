@@ -72,6 +72,58 @@ test("allowlist: isAllowlisted / entryFor 大小写都认", async () =>
     assert.equal(entryFor(B, list), undefined);
   }));
 
+test("allowlist: expiresAt 支持 ISO 字符串 / unix 秒 / 毫秒", async () =>
+  withTempAllowlist(
+    JSON.stringify({
+      [A]: { limit: 2, expiresAt: "2026-10-01T00:00:00.000Z" },
+      [B]: { limit: 2, expiresAt: 1800000000 },
+    }),
+    async (p) => {
+      const { loadAllowlist } = await import("../src/allowlist.ts?v=" + (Date.now() + 6));
+      const list = loadAllowlist(p);
+      assert.equal(list[A].expiresAt, Date.parse("2026-10-01T00:00:00.000Z") / 1000);
+      assert.equal(list[B].expiresAt, 1800000000);
+    },
+  ));
+
+test("allowlist: expiresAt 缺省/非法 → 永不过期（不静默拒绝）", async () =>
+  withTempAllowlist(
+    JSON.stringify({ [A]: { limit: 2 }, [B]: { limit: 2, expiresAt: "下周三" } }),
+    async (p) => {
+      const { loadAllowlist, isExpired } = await import(
+        "../src/allowlist.ts?v=" + (Date.now() + 7)
+      );
+      const list = loadAllowlist(p);
+      // 配错的到期时间若被当成"过期"，整批人会被无声拒之门外——宁可放行
+      assert.equal(list[A].expiresAt, null);
+      assert.equal(list[B].expiresAt, null);
+      assert.equal(isExpired(list[B]), false);
+    },
+  ));
+
+test("allowlist: isExpired 边界 —— 到期那一刻仍算有效", async () => {
+  const { isExpired } = await import("../src/allowlist.ts?v=" + (Date.now() + 8));
+  const at = 1800000000;
+  const entry = { limit: 1, expiresAt: at };
+  assert.equal(isExpired(entry, at - 1), false);
+  assert.equal(isExpired(entry, at), false, "「有效期至当天」应包含当天");
+  assert.equal(isExpired(entry, at + 1), true);
+  assert.equal(isExpired(undefined, at), false, "没有条目不算过期");
+});
+
+test("allowlist: 一条地址写错只跳过它，不把整份白名单清空", async () =>
+  withTempAllowlist(
+    // 有人手抄地址少一位、或误留模板占位符，都会走到这条路径
+    JSON.stringify({ [A]: { limit: 2 }, "0xNOT_AN_ADDRESS": { limit: 5 } }),
+    async (p) => {
+      const { loadAllowlist } = await import("../src/allowlist.ts?v=" + (Date.now() + 9));
+      const list = loadAllowlist(p);
+      assert.equal(Object.keys(list).length, 1, "坏 key 被跳过，好的那条必须留下");
+      assert.equal(list[A].limit, 2);
+      // 反面情形：整份被吞掉 = 所有人 403 且毫无提示，正是要避免的
+    },
+  ));
+
 test("allowlist: 非法地址 isAllowlisted 返回 false 不抛", async () =>
   withTempAllowlist(JSON.stringify({ [A]: { limit: 1 } }), async (p) => {
     const { loadAllowlist, isAllowlisted } = await import(

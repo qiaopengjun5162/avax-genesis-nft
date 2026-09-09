@@ -17,7 +17,7 @@ import { ethers } from "ethers";
 import { env } from "./env.ts";
 import { CONTRACT_ADDRESS, FUJI_CHAIN_ID, FUJI_RPC, recoverSigner, signMint } from "./protocol.ts";
 import { genesisArt } from "./art.ts";
-import { entryFor, loadAllowlist, type Allowlist } from "./allowlist.ts";
+import { entryFor, isExpired, loadAllowlist, type Allowlist } from "./allowlist.ts";
 import { numberMintedOnChain, signerOnChain, totalSupplyOnChain } from "./chain.ts";
 import { RateLimiter, clientIp } from "./ratelimit.ts";
 import { InflightSlots, KeyedLock } from "./inflight.ts";
@@ -336,14 +336,12 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
       if (tooMany(req, res, allowlistLimiter, clientIp(req, { trustProxy: TRUST_PROXY }))) return;
       const wallet = ethers.getAddress(alMatch[1]);
       const entry = entryFor(wallet, _allowlist);
+      const expired = isExpired(entry);
       // 不在白名单 → minted/remaining=0；有配额但 RPC 不可达 → null（前端按"未知"处理）
-      let mintedOut: number | null;
-      let remainingOut: number | null;
+      let mintedOut: number | null = 0;
+      let remainingOut: number | null = 0;
       let pendingOut = 0;
-      if (!entry) {
-        mintedOut = 0;
-        remainingOut = 0;
-      } else {
+      if (entry && !expired) {
         // 与 /sign 同一套口径：已铸 + 已签未上链 都算占用。
         // 否则前端会显示 remaining=3，用户点下去却吃 403（有签名在飞）。
         pendingOut = _inflight.count(wallet);
@@ -358,7 +356,9 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
       }
       return send(req, res, 200, {
         wallet,
-        allowlisted: Boolean(entry),
+        allowlisted: Boolean(entry) && !expired,
+        expired,
+        expiresAt: entry?.expiresAt ?? null,
         limit: entry?.limit ?? 0,
         minted: mintedOut,
         remaining: remainingOut,
@@ -386,6 +386,13 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
 
       const entry = entryFor(addr, _allowlist);
       if (!entry) return send(req, res, 403, { error: "钱包不在白名单", wallet: addr });
+      if (isExpired(entry)) {
+        return send(req, res, 403, {
+          error: `白名单资格已于 ${new Date((entry.expiresAt ?? 0) * 1000).toISOString()} 过期`,
+          wallet: addr,
+          expired: true,
+        });
+      }
 
       // 同钱包排队 + 占位：两者缺一不可。只排队不占位 → 第 2 个请求
       // 读到同一个 minted（此刻还没上链）照样签出去；只占位不排队 →
@@ -487,7 +494,14 @@ if (isMain && signer) {
   console.log(`✅ GenesisMint v3 签名服务启动`);
   console.log(`   合约    : ${CONTRACT_ADDRESS} (chainId ${FUJI_CHAIN_ID})`);
   console.log(`   signer  : ${signer.address}`);
-  console.log(`   白名单  : ${Object.keys(allowlist).length} 个钱包（配额制，可多次 mint）`);
+  {
+    const total = Object.keys(allowlist).length;
+    const expiredCount = Object.values(allowlist).filter((e) => isExpired(e)).length;
+    console.log(
+      `   白名单  : ${total} 个钱包（配额制，可多次 mint）` +
+        (expiredCount ? `，其中 ${expiredCount} 个已过期` : ""),
+    );
+  }
   console.log(`   监听    : http://127.0.0.1:${PORT}`);
   console.log(
     `   限流键  : ${TRUST_PROXY ? "X-Forwarded-For（已信任代理）" : "socket IP（反向代理后需设 TRUST_PROXY=1）"}`,

@@ -289,6 +289,51 @@ test("accesslog: 结构化一行日志（去 query / UA 裁剪 / 含耗时）", 
   assert.doesNotThrow(() => JSON.stringify(line));
 });
 
+// ---- 白名单到期（expiresAt）----
+
+test("server: /sign 白名单已过期返回 403（且不去读链上配额）", async () => {
+  const w = new ethers.Wallet(ANVIL_KEY_0);
+  let chainReads = 0;
+  const res = mockRes();
+  await handler(postSign({ wallet: ANVIL_ADDR_0, imageURI: "https://example.com/x.png" }, "12.12.12.1"), res, {
+    signer: w,
+    allowlist: { [ANVIL_ADDR_0]: { limit: 3, expiresAt: Math.floor(Date.now() / 1000) - 60 } } as Allowlist,
+    numberMintedOnChain: async () => {
+      chainReads += 1;
+      return 0;
+    },
+  });
+  assert.equal(res.statusCode, 403);
+  assert.match(res._body, /过期/);
+  assert.equal(chainReads, 0, "过期就没必要再打 RPC");
+});
+
+test("server: /allowlist 已过期 → allowlisted=false + expired=true", async () => {
+  const res = mockRes();
+  await handler(getAllowlist(ANVIL_ADDR_0, "12.12.12.2"), res, {
+    allowlist: { [ANVIL_ADDR_0]: { limit: 3, expiresAt: Math.floor(Date.now() / 1000) - 60 } } as Allowlist,
+    numberMintedOnChain: async () => 0,
+  });
+  assert.equal(res.statusCode, 200);
+  const body = JSON.parse(res._body);
+  assert.equal(body.expired, true);
+  assert.equal(body.allowlisted, false); // 语义：现在不给你签
+  assert.equal(body.limit, 3); // 但原本的配额仍返回，前端可以显示"曾可领 3 张"
+  assert.ok(body.expiresAt > 0);
+});
+
+test("server: /sign 未过期正常签发（回归：别把没到期的人也拦了）", async () => {
+  const w = new ethers.Wallet(ANVIL_KEY_0);
+  const res = mockRes();
+  await handler(postSign({ wallet: ANVIL_ADDR_0, imageURI: "https://example.com/x.png" }, "12.12.12.3"), res, {
+    signer: w,
+    allowlist: { [ANVIL_ADDR_0]: { limit: 3, expiresAt: Math.floor(Date.now() / 1000) + 3600 } } as Allowlist,
+    numberMintedOnChain: async () => 0,
+  });
+  assert.equal(res.statusCode, 200);
+  assert.match(JSON.parse(res._body).signature, /^0x/);
+});
+
 // ---- 创世图序号（防同钱包连签撞同一张图）----
 
 test("artIndex: 链上总量不动时也严格递增", () => {
