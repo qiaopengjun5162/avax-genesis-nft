@@ -14,7 +14,7 @@ const inputCls =
 const REVERT_HINTS: Array<{ sel: string; hint: string }> = [
   { sel: "0x8baa579f", hint: "签名无效：钱包不在白名单 / 签名被篡改，请重试" },
   { sel: "0x7248afc4", hint: "签名已过期：领取窗口约 1 小时，请重新点 Mint 要一个新签名" }, // SignatureExpired
-  { sel: "0x900bb2c9", hint: "这张图这个钱包已经领过了（每个签名只能用一次），换一张或重新要个签名" },
+  { sel: "0x900bb2c9", hint: "这个签名已经上链过了（同一签名只能用一次），请重新点 Mint 要一个新签名" },
   { sel: "0x06290e4e", hint: "mint 还没开始（合约 Waiting 状态）" },
   { sel: "0x8a164f63", hint: "供给已满（1000/1000）" },
   // 后续合约定性调整带来的新错误（v3+）——cast sig -- 验证过

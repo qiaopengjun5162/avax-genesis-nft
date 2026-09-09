@@ -26,10 +26,17 @@ signature = backend.sign(final)
 | `chainid` | 把 Fuji 签名拿到主网用 | revert |
 | `contract` | 把演示实例签名用到自部署实例 | revert |
 | `wallet` | 把 alice 的签名给 bob 调 mint | revert（recovered ≠ msg.sender） |
-| `imageURI` | 同一钱包用旧图 reuse 签名 | revert（`usedHashes` 标记已用） |
+| `imageURI` | 把同一个签名上链两次 | revert（`usedHashes` 标记已用） |
 | `deadline` | 白名单移除 / 私钥泄露后旧签名一直可用 | revert（`SignatureExpired`，后端默认给 ~1h 窗口） |
 
 钱包**本身**没有"一张"的限制（v3 修正为"按配额"，每个白名单钱包可在限额内 mint 多张，每张图必须独立签名）。
+
+> ⚠️ 一个容易看错的点：`usedHashes` 的键是
+> `keccak(chainid, contract, msg.sender, imageURI, deadline)`，**含 `deadline`**。
+> 所以链上保证的是「同一个签名不能上链两次」，而**不是**「同一个钱包不能铸两张相同的图」——
+> 换一个新 `deadline` 重新签，同一张图还能再铸一次。这就是为什么后端必须保证自动分配的
+> 创世图序号严格递增（含重启后，见下）。真要"一钱包一图"得改合约去掉去重键里的 `deadline`
+> 并重新部署。
 
 ### 配额由后端把关，因此后端自己也得扛住
 
@@ -195,7 +202,7 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 | 合约 | forge | **35** 全过 | `forge test --force` |
 | 合约 lint | forge lint | 0 警告 | `forge lint` |
 | 合约覆盖率 | lcov | 100% (L/S/B/F) | `forge coverage` |
-| 后端 | node:test | **60** 全过 | `cd backend && npm test` |
+| 后端 | node:test | **66** 全过 | `cd backend && npm test` |
 | 前端 | tsc | 类型检查 | `cd frontend && npx tsc --noEmit` |
 | 前端 | eslint | 0 error | `cd frontend && npm run lint` |
 
@@ -264,4 +271,8 @@ CI 里 `contracts` job 跑 `forge build`，本地手动同步走脚本。
   并发占位会失守），要跨副本一致得搬到 Redis
 - 签名服务是单点的：进程重启会丢失 pending 记录（未上链签名仍在用户手里且有效，
   只是名额在那 1h 内不再被预留）——可接受，因为签名本身 1h 后就过期
+- 图序号水位线落盘在 `backend/data/.art-index`：多副本部署各写一份，仍可能撞号
+  （要彻底避免得用链上/Redis 统一发号）
+- 内存有界但非精确：限流桶上限 5 万个 key，超限淘汰最老的（对它们临时放宽计数）；
+  in-flight 槽位每 64 次 claim 全局清扫一次
 - `genesisArt` 是单文件 SVG 内联（无链下资源依赖），未来如要加 PFP / 头像组件可直接后端替换
