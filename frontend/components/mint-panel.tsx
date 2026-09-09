@@ -83,10 +83,14 @@ export default function MintPanel() {
   const fetchQuota = useCallback(async () => {
     if (!address) return;
     try {
-      const r = await fetch(`${SIGNER_URL}/allowlist/${address}`);
+      // 15s 超时：RPC 慢 + 同钱包锁排队都可能在 8s 上限（RPC_QUERY_TIMEOUT_MS）
+      // 之后再卡几秒。给个总上限就免得「按钮卡在 ① 向后端要签名…」。
+      const r = await fetch(`${SIGNER_URL}/allowlist/${address}`, {
+        signal: AbortSignal.timeout(15_000),
+      });
       if (r.ok) setQuota(await r.json());
     } catch {
-      /* 后端没起时静默 */
+      /* 后端没起 / 超时：静默，下一轮继续试 */
     }
   }, [address]);
 
@@ -106,6 +110,22 @@ export default function MintPanel() {
     return () => clearInterval(t);
   }, []);
 
+  // 切钱包时立刻清掉上一个账户的所有状态：quota / error / 预览图 / tx
+  // ——否则切完会看到 A 钱包的「已领 1/3」、A 钱包的报错、A 钱包的交易
+  // hash，最多等 4s 轮询才会刷成 B 的，期间还能点 mint（按钮条件只看
+  // quotaDone，未对 address 做 key），最坏情况是用户按 A 的状态判断、
+  // 调 B 的签名 + B 的链上交易，4s 后才发现走错了。
+  useEffect(() => {
+    // 这四个 setState 跟 address 是直接绑定（address 变 → 状态必须跟着变），
+    // 属于 effect 的合法用法；set-state-in-effect 规则无法区分这种「依赖
+    // 同步重置」与「同步级联渲染」，故误报。关单行，不关全局。
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setQuota(null);
+    setError(null);
+    setArtPreview(null);
+    setTxHash(null);
+  }, [address]);
+
   async function onMint() {
     if (!address) return;
     setError(null);
@@ -119,6 +139,9 @@ export default function MintPanel() {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
+        // 20s：含 RPC 核验（8s timeout）+ in-flight 排队 + 链上读写。超出
+        // 即取消，下次点 mint 重新要签名
+        signal: AbortSignal.timeout(20_000),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -147,7 +170,13 @@ export default function MintPanel() {
       });
       setTxHash(hash);
     } catch (e) {
-      setError(humanizeError(e));
+      // AbortSignal.timeout 抛 DOMException（name=TimeoutError，AbortError 的子类），
+      // 人话化只会得到「The user aborted a request」这种没头没尾的
+      if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")) {
+        setError("请求超时：签名服务 20 秒内没回（后端可能挂了或链上 RPC 卡着），重试一次");
+      } else {
+        setError(humanizeError(e));
+      }
     } finally {
       setBusy(null);
     }
