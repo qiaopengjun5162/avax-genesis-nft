@@ -28,6 +28,9 @@ frontend/coverage/
 # 调试 / 系统
 *.log
 core
+
+# 后端运行时状态（图序号水位线，重启读回；不属于源码）
+backend/data/.art-index
 core.*
 
 # WorkBuddy 项目内存/协作数据（非源码，不入库）

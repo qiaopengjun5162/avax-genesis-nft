@@ -12,6 +12,8 @@
  * 运行：node src/server.ts   （Node ≥22，需 --experimental-strip-types，见 package.json start）
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { ethers } from "ethers";
 import { env } from "./env.ts";
@@ -230,22 +232,52 @@ const inflight = new InflightSlots();
 /** 同钱包 /sign 排队执行，避免并发请求同时占位后互相误判 */
 const locks = new KeyedLock();
 
-/** 已分配过的最大图序号（进程内水位线，只增不减） */
-let lastArtIndex = -1;
+/**
+ * 图序号水位线的落盘位置。为什么要落盘：水位线只活在内存里的话，重启就
+ * 归零，而此时链上 totalSupply 可能还没变（上一张还没上链）→ 又算出同一
+ * 个序号 → 同一张图。合约 usedHashes 的键含 deadline，新签名 deadline
+ * 不同，去重挡不住 → 同一个钱包真能铸出两张一模一样的 NFT。
+ */
+const ART_INDEX_FILE = resolve(import.meta.dirname, "../data/.art-index");
+
+/** 读回水位线；文件缺失 / 内容不可信 → -1（当作从没发过，与首次启动等价） */
+export function loadArtIndex(path: string = ART_INDEX_FILE): number {
+  try {
+    const n = Number(readFileSync(path, "utf8").trim());
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : -1;
+  } catch {
+    return -1;
+  }
+}
+
+/** 落盘水位线。写失败只 warn：图序号重复是「铸出重复图」，服务不该因此挂掉 */
+function persistArtIndex(n: number, path: string = ART_INDEX_FILE): void {
+  try {
+    writeFileSync(path, String(n));
+  } catch (e) {
+    console.warn(`⚠️  图序号水位线落盘失败，重启后可能重复发图：${(e as Error).message}`);
+  }
+}
+
+/** 已分配过的最大图序号（水位线，只增不减）。测试里恒定从 -1 开始，不碰磁盘 */
+let lastArtIndex = isMain ? loadArtIndex() : -1;
 
 /**
  * 下一个创世图序号。
  *
  * 不能直接用 totalSupply：同一钱包在第一张上链之前再签一次，链上
  * totalSupply 还没变，两次会算出同一个序号 → genesisArt(钱包, 序号)
- * 完全相同 → 同一张 data URI。合约按 (wallet, imageURI) 去重，第二张
- * mint 必然撞 SignatureAlreadyUsed，白签一次还看不出原因。
+ * 完全相同 → 同一张 data URI，铸出来就是两张一模一样的 NFT。
  *
- * 取 max(链上总量, 水位线+1)：既跟得上链上进度，又保证本进程内严格递增。
+ * 取 max(链上总量, 水位线+1)：既跟得上链上进度，又保证本进程内严格递增；
+ * 水位线落盘，重启后也不会退回去。
  */
 export function nextArtIndex(totalSupply: number): number {
   const next = Math.max(totalSupply, lastArtIndex + 1);
-  lastArtIndex = next;
+  if (next !== lastArtIndex) {
+    lastArtIndex = next;
+    if (isMain) persistArtIndex(next);
+  }
   return next;
 }
 

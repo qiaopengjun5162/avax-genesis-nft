@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ethers } from "ethers";
-import { handler, corsHeaders, formatAccessLog, nextArtIndex, resetArtIndex } from "../src/server.ts";
+import {
+  handler,
+  corsHeaders,
+  formatAccessLog,
+  nextArtIndex,
+  resetArtIndex,
+  loadArtIndex,
+} from "../src/server.ts";
 import { type Allowlist } from "../src/allowlist.ts";
 import { RateLimiter, clientIp } from "../src/ratelimit.ts";
 import { InflightSlots, KeyedLock } from "../src/inflight.ts";
@@ -539,4 +549,65 @@ test("server: /sign 失败路径归还 in-flight 占位，重试不受影响", a
     deps(async () => 0),
   );
   assert.equal(r2.statusCode, 200);
+});
+
+// ---- 内存有界：限流桶 / in-flight 槽位都不能只增不减 ----
+
+test("ratelimit: 过期桶被惰性回收（Map 不随来访 IP 数无限增长）", () => {
+  const rl = new RateLimiter(10, 1000);
+  const t0 = 1_000_000;
+  for (let i = 0; i < 100; i++) rl.hit(`ip-${i}`, t0);
+  assert.equal(rl.size, 100);
+  // 跨过一个窗口后再来一次请求 → 触发清扫，旧桶全清，只剩这一个
+  rl.hit("ip-new", t0 + 1001);
+  assert.equal(rl.size, 1);
+});
+
+test("ratelimit: key 数超硬上限时淘汰最老的（宁可放宽计数也不 OOM）", () => {
+  const rl = new RateLimiter(10, 60_000, { maxKeys: 50 });
+  const t0 = 2_000_000;
+  for (let i = 0; i < 80; i++) rl.hit(`ip-${i}`, t0);
+  assert.ok(rl.size <= 51, `应被压回上限附近，实际 ${rl.size}`);
+  // 反面情形：不设上限时这里会是 80 且随流量单调增长
+});
+
+test("inflight: 过期槽位即使没人再查也会被全局清扫回收", () => {
+  const f = new InflightSlots();
+  const nowSec = Math.floor(Date.now() / 1000);
+  f.claim("0xaaa", nowSec - 10); // 已过期
+  f.claim("0xbbb", nowSec + 600); // 仍有效
+  assert.equal(f.walletCount, 2);
+  assert.equal(f.sweep(nowSec), 1);
+  assert.equal(f.walletCount, 1, "过期的回收掉，有效的必须留着");
+  assert.equal(f.count("0xbbb", nowSec), 1);
+});
+
+test("inflight: claim 满 64 次自动全局清扫一次", () => {
+  const f = new InflightSlots();
+  const nowSec = Math.floor(Date.now() / 1000);
+  for (let i = 0; i < 64; i++) f.claim(`w${i}`, nowSec - 1);
+  assert.ok(f.walletCount < 64, `应有槽位被自动回收，实际 ${f.walletCount}`);
+});
+
+// ---- 图序号水位线落盘（防重启后又撞同一张图）----
+
+test("artIndex: 水位线可落盘读回，坏内容回退 -1", async () => {
+  const { loadArtIndex: load } = await import("../src/server.ts");
+  const p = join(mkdtempSync(join(tmpdir(), "artidx-")), ".art-index");
+  assert.equal(load(p), -1, "文件不存在 → 当作从没发过");
+  writeFileSync(p, " 42 \n");
+  assert.equal(load(p), 42, "容忍首尾空白");
+  writeFileSync(p, "not-a-number");
+  assert.equal(load(p), -1, "内容不可信 → 回退 -1，不拿错序号去发图");
+  writeFileSync(p, "-5");
+  assert.equal(load(p), -1, "负数同样不可信");
+});
+
+test("artIndex: 重启后读回的水位线继续递增（不退回撞图）", async () => {
+  const { loadArtIndex: load } = await import("../src/server.ts");
+  const p = join(mkdtempSync(join(tmpdir(), "artidx-")), ".art-index");
+  writeFileSync(p, "7");
+  // 模拟重启：水位线从盘上读回，此时链上总量仍是 5（上一张还没上链）
+  const resumed = load(p);
+  assert.equal(Math.max(5, resumed + 1), 8, "必须接着 7 往后走，而不是回到 5+1=6");
 });
