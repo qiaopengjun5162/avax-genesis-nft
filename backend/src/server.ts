@@ -507,6 +507,60 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
   }
 }
 
+/**
+ * 优雅关闭需要的最小 server 接口（node:http.Server 天然符合，
+ * 测试里用同形状的假对象即可，不必真绑端口）。
+ */
+export type ClosableServer = {
+  close: (cb?: (err?: Error) => void) => void;
+  closeIdleConnections?: () => void;
+  closeAllConnections?: () => void;
+};
+
+/**
+ * 优雅关闭：停收新连接 → 等fulfil在途请求 → 退出。
+ *
+ * 关键在于**必须显式断开空闲的 keep-alive 连接**。server.close() 只表示
+ * 「不再 accept 新连接」，已经建立且当前空闲的连接不会被自动关闭——而前端
+ * 恰恰每 4s 轮询一次 /allowlist，长期占着一条 keep-alive。结果 close 的
+ * 回调要等到 keepAliveTimeout（默认 5s）自然超时才可能触发，实际表现是
+ * 每次重启都走满兜底超时、以 exit(1) 收场：systemd 记成失败，还可能触发
+ * 重启策略。
+ *
+ * closeIdleConnections 只断**空闲**的，真正有请求在跑的连接不受影响。
+ * 兜底定时器到点则 closeAllConnections 强断所有（含在途），宁可掐断一个
+ * 请求也不能让进程永远退不掉。
+ */
+export function gracefulShutdown(
+  server: ClosableServer,
+  opts: {
+    graceMs?: number;
+    log?: (msg: string) => void;
+    exit?: (code: number) => void;
+  } = {},
+): void {
+  const graceMs = opts.graceMs ?? 10_000;
+  const log = opts.log ?? ((m: string) => console.log(m));
+  const exit = opts.exit ?? ((code: number) => process.exit(code));
+
+  log("停止接收新请求，等待在途请求结束…");
+  // 顺序要紧：先 close（停止 accept），再清空闲连接——反过来的话，
+  // 刚清掉的连接可能马上被新请求补上，close 回调照样等不到。
+  server.close(() => {
+    log("已优雅关闭");
+    exit(0);
+  });
+  server.closeIdleConnections?.();
+
+  const timer = setTimeout(() => {
+    log(`等待超过 ${graceMs}ms，强制关闭剩余连接`);
+    server.closeAllConnections?.();
+    exit(1);
+  }, graceMs);
+  // 别让兜底定时器把进程拖住：没有在途请求时，进程应该自然退出
+  timer.unref?.();
+}
+
 /** 启动自检：本服务私钥 ↔ 链上 signer，对不上当场告警（最隐蔽故障） */
 async function selfCheck() {
   const onChain = await signerOnChain();
@@ -555,20 +609,20 @@ if (isMain && signer) {
   // 再退出——否则会掐断正在进行的 /sign。加超时兜底，避免有连接挂死
   // 导致进程永远退不掉。
   const SHUTDOWN_GRACE_MS = 10_000;
+  // keep-alive 空闲超时：关到比兜底宽限期短，close 回调才有机会先触发；
+  // 太长则空闲连接一直吊着，重启就总是走强制退出那条路。
+  server.keepAliveTimeout = 5_000;
+  server.headersTimeout = 6_000;
   let shuttingDown = false;
   for (const sig of ["SIGTERM", "SIGINT"] as const) {
     process.on(sig, () => {
       if (shuttingDown) return;
       shuttingDown = true;
-      console.log(`\n收到 ${sig}：停止接收新请求，等待在途请求结束…`);
-      server.close(() => {
-        console.log("已优雅关闭");
-        process.exit(0);
+      console.log(`\n收到 ${sig}：`);
+      gracefulShutdown(server, {
+        graceMs: SHUTDOWN_GRACE_MS,
+        log: (m) => (m.startsWith("等待超过") ? console.warn(m) : console.log(m)),
       });
-      setTimeout(() => {
-        console.warn(`等待超过 ${SHUTDOWN_GRACE_MS}ms，强制退出`);
-        process.exit(1);
-      }, SHUTDOWN_GRACE_MS).unref();
     });
   }
 }

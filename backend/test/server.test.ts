@@ -11,6 +11,8 @@ import {
   nextArtIndex,
   resetArtIndex,
   loadArtIndex,
+  gracefulShutdown,
+  type ClosableServer,
 } from "../src/server.ts";
 import { type Allowlist } from "../src/allowlist.ts";
 import { RateLimiter, clientIp } from "../src/ratelimit.ts";
@@ -610,4 +612,46 @@ test("artIndex: 重启后读回的水位线继续递增（不退回撞图）", a
   // 模拟重启：水位线从盘上读回，此时链上总量仍是 5（上一张还没上链）
   const resumed = load(p);
   assert.equal(Math.max(5, resumed + 1), 8, "必须接着 7 往后走，而不是回到 5+1=6");
+});
+
+// ---- 优雅关闭 ----
+
+/** 记录调用顺序的假 server（不绑端口，纯行为断言） */
+function mockServer() {
+  const calls: string[] = [];
+  let closeCb: (() => void) | undefined;
+  const server: ClosableServer & { calls: string[]; fireClose: () => void } = {
+    calls,
+    close: (cb) => {
+      calls.push("close");
+      closeCb = cb as (() => void) | undefined;
+    },
+    closeIdleConnections: () => calls.push("closeIdleConnections"),
+    closeAllConnections: () => calls.push("closeAllConnections"),
+    fireClose: () => closeCb?.(),
+  };
+  return server;
+}
+
+test("gracefulShutdown: 先 close 再断空闲连接，close 回调一到就 exit 0", () => {
+  const s = mockServer();
+  const exits: number[] = [];
+  gracefulShutdown(s, { graceMs: 5000, log: () => {}, exit: (c) => exits.push(c) });
+
+  // 顺序要紧：先停止 accept，再清空闲——反了的话清完又被新请求补上
+  assert.deepEqual(s.calls, ["close", "closeIdleConnections"]);
+  s.fireClose();
+  assert.deepEqual(exits, [0], "在途请求跑完 → 正常退出，不带失败码");
+});
+
+test("gracefulShutdown: 到点还没关完 → 强断所有连接并 exit 1", async () => {
+  const s = mockServer();
+  const exits: number[] = [];
+  const logs: string[] = [];
+  gracefulShutdown(s, { graceMs: 10, log: (m) => logs.push(m), exit: (c) => exits.push(c) });
+
+  await new Promise((r) => setTimeout(r, 60));
+  assert.deepEqual(exits, [1], "超时必须退出，不能永远挂着");
+  assert.ok(s.calls.includes("closeAllConnections"), "兜底要把在途连接也断掉");
+  assert.ok(logs.some((m) => m.includes("强制关闭")), "要留下一条可排查的告警");
 });
