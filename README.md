@@ -61,8 +61,8 @@ backend/              Node 22 原生 TS，零运行时依赖（仅 ethers）
   src/protocol.ts     signMint / recoverSigner（与合约逐字节对齐）
   src/art.ts          创世 SVG 生成器（确定性）
   src/env.ts          .env 手写解析（支持引号/注释/export 前缀）
-  src/allowlist.ts    backend/data/allowlist.json → 配额表
-  data/allowlist.json { "0xWallet": { "limit": N } }（格式见 allowlist.example.json）
+  src/allowlist.ts    配额表加载 + expiresAt 到期判定（坏 key 跳过不清空）
+  data/allowlist.json { "0xWallet": { "limit": N, "expiresAt"?: ISO } }（见 allowlist.example.json）
 
 contracts/
   src/GenesisMint.sol ERC721A + ECDSA + 自定义错误
@@ -130,11 +130,14 @@ npm start                        # → http://127.0.0.1:8787
 |---|---|---|
 | GET | `/` | 服务信息（合约 / chainId / signer / 白名单数） |
 | GET | `/healthz` | 就绪探针：`{ok, status: ok\|degraded, rpc:{reachable, blockNumber}, uptimeSec}`；RPC 3s 超时 + 15s 缓存，可被容器探针高频打而不压 RPC |
-| GET | `/allowlist/:wallet` | 查配额（allowlisted / limit / minted / remaining / pending） |
+| GET | `/allowlist/:wallet` | 查配额（allowlisted / limit / minted / remaining / pending / expired / expiresAt） |
 | POST | `/sign` | `{wallet, imageURI?}` → `{imageURI, signature, minted, limit, remaining, deadline}` |
 
 `remaining` 与 `pending`：已签发但还没上链的签名会**占用**名额（`remaining = limit - minted - pending`），
 签名过期（`SIGN_DEADLINE_SECONDS`，默认 1h）或上链后自动释放。这样前端显示的剩余数与"再点一次会不会被拒"始终一致。
+
+`expiresAt` 到期后：`/allowlist` 返回 `allowlisted:false` + `expired:true`（`limit` 仍回传，供前端显示"原可领 N 张"），
+`/sign` 直接 403 且**不读链上配额**（省一次 RPC）。
 
 缺 `SIGNER_PRIVATE_KEY` 时直接启动失败；若仅 RPC 不通，`/healthz` 返回 `degraded` 但服务照常运行。
 
@@ -159,6 +162,17 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 
 格式：`{ "0xWallet": { "limit": N } }`，钱包可在限额内 mint N 张（每张图必须独立签名）。
 
+可选的 `expiresAt`（资格到期时间，ISO 字符串或 unix 秒都收）：
+
+```json
+{ "0xWallet": { "limit": 2, "expiresAt": "2026-12-31T23:59:59Z" } }
+```
+
+- 到期那一刻**仍算有效**（"有效期至 10 月 1 日"按常识包含当天）
+- 不填 / 填了认不出的值 → 永不过期：宁可让一条配错的白名单继续有效，
+  也不要静默把整批人拒之门外
+- 地址写错只跳过那一条并打 `⚠️` 日志，不会把整份白名单吞成空（曾导致全员 403 且日志无声）
+
 优雅关闭：服务收到 `SIGTERM` / `SIGINT` 会先停收新连接、等在途请求结束再退出（10s 超时兜底强退）。
 
 ### 4. 运维要点
@@ -170,6 +184,7 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 | 不用任何反向代理直连 | 保持 `TRUST_PROXY` 留空——`X-Forwarded-For` 是客户端可伪造的，认了它限流就形同虚设 |
 | 上线 | `CORS_ORIGIN` 填前端域名（逗号分隔多源）；留空是对全世界回显 `*` |
 | RPC 慢 / 挂 | `RPC_QUERY_TIMEOUT_MS`（默认 8s）兜底，超时按 fail-closed 走 503 拒签 |
+| 活动结束 / 名额到期 | 给条目加 `expiresAt` 后 `kill -HUP` 热加载，到期自动 403；启动日志会打印「其中 N 个已过期」，一眼可查有没有漏配 |
 
 ---
 
@@ -180,7 +195,7 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 | 合约 | forge | **35** 全过 | `forge test --force` |
 | 合约 lint | forge lint | 0 警告 | `forge lint` |
 | 合约覆盖率 | lcov | 100% (L/S/B/F) | `forge coverage` |
-| 后端 | node:test | **51** 全过 | `cd backend && npm test` |
+| 后端 | node:test | **60** 全过 | `cd backend && npm test` |
 | 前端 | tsc | 类型检查 | `cd frontend && npx tsc --noEmit` |
 | 前端 | eslint | 0 error | `cd frontend && npm run lint` |
 
@@ -244,7 +259,7 @@ CI 里 `contracts` job 跑 `forge build`，本地手动同步走脚本。
 - 公共 RPC `api.avax-test.network` 偶有限流，必要时换 Ankr / 自己节点：
   - 后端改 `.env` 的 `FUJI_RPC`
   - 前端改 `.env.local` 的 `NEXT_PUBLIC_RPC_URL`（默认还会兜底 PublicNode，viem fallback 自动切）
-- 白名单配额是"白名单钱包×整数 limit"模型，没有到期/按 IP 维度
+- 白名单配额是"白名单钱包×整数 limit"模型（`expiresAt` 已支持到期），没有按 IP 维度
 - 限流与 in-flight 占位都在**单进程内存**里：多副本部署时各自计数（限流会放宽约 N 倍，
   并发占位会失守），要跨副本一致得搬到 Redis
 - 签名服务是单点的：进程重启会丢失 pending 记录（未上链签名仍在用户手里且有效，
