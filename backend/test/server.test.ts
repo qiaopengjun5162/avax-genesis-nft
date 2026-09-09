@@ -12,6 +12,7 @@ import {
   resetArtIndex,
   loadArtIndex,
   gracefulShutdown,
+  numEnv,
   type ClosableServer,
 } from "../src/server.ts";
 import { type Allowlist } from "../src/allowlist.ts";
@@ -672,6 +673,35 @@ test("server: 未捕获异常只回通用文案，不把内部细节吐给客户
   } finally {
     quiet.mock.restore();
   }
+});
+
+// ---- 启动配置自检 ----
+
+test("numEnv: 合法值原样返回", () => {
+  assert.equal(numEnv("X", 30, { min: 1, max: 100 }, { X: "30" }), 30);
+  assert.equal(numEnv("X", 30, { min: 1, max: 100 }, { X: "1" }), 1, "下界包含");
+  assert.equal(numEnv("X", 30, { min: 1, max: 100 }, { X: "100" }), 100, "上界包含");
+});
+
+test("numEnv: 缺省/空串/非法值一律回退", () => {
+  const quiet = mock.method(console, "warn", () => {});
+  try {
+    assert.equal(numEnv("X", 30, {}, {}), 30, "缺省");
+    assert.equal(numEnv("X", 30, {}, { X: "" }), 30, "空串");
+    assert.equal(numEnv("X", 30, { min: 1 }, { X: "0" }), 30, "0 在 {min:1} 下非法");
+    assert.equal(numEnv("X", 30, { min: 1 }, { X: "abc" }), 30, "非数字");
+    assert.equal(numEnv("X", 30, { min: 1 }, { X: "NaN" }), 30, "显式 NaN 字符串");
+    assert.equal(numEnv("X", 30, { max: 100 }, { X: "1e9" }), 30, "超上界");
+  } finally {
+    quiet.mock.restore();
+  }
+});
+
+test("numEnv: 缺省的语义是「用 fallback」，不是「当成 0 处理」", () => {
+  // 防止有人把签名过期时间配成 SIGN_DEADLINE_SECONDS=0 → Number("0") = 0
+  // → 走「合法值」分支 → deadline = now → 用户签名立即过期。
+  // 0 是合法整数，但对 SIGN_DEADLINE_SECONDS 是灾难值。
+  assert.equal(numEnv("SIGN_DEADLINE_SECONDS", 3600, { min: 1 }, { SIGN_DEADLINE_SECONDS: "0" }), 3600);
 });
 
 // ---- 优雅关闭 ----

@@ -24,7 +24,7 @@ import { numberMintedOnChain, signerOnChain, totalSupplyOnChain } from "./chain.
 import { RateLimiter, clientIp } from "./ratelimit.ts";
 import { InflightSlots, KeyedLock } from "./inflight.ts";
 
-const PORT = Number(env.PORT ?? 8787);
+const PORT = numEnv("PORT", 8787, { min: 1, max: 65535 });
 
 /**
  * 仅当该文件被「直接执行」（而非被 import 进测试）时才启动监听与自检，
@@ -59,12 +59,50 @@ let allowlist = loadAllowlist();
  *  - /allowlist  每 IP 60s 内 60 次（只读，轻一些）
  * 多副本部署需把这套迁到 Redis，否则各进程独立计数。
  */
-const SIGN_WINDOW_MS = Number(env.SIGN_RATE_WINDOW_MS ?? 60_000);
-const signLimiter = new RateLimiter(Number(env.SIGN_RATE_LIMIT ?? 30), SIGN_WINDOW_MS);
-const allowlistLimiter = new RateLimiter(Number(env.ALLOWLIST_RATE_LIMIT ?? 60), SIGN_WINDOW_MS);
+const SIGN_WINDOW_MS = numEnv("SIGN_RATE_WINDOW_MS", 60_000, { min: 1000 });
+const signLimiter = new RateLimiter(numEnv("SIGN_RATE_LIMIT", 30, { min: 1 }), SIGN_WINDOW_MS);
+const allowlistLimiter = new RateLimiter(numEnv("ALLOWLIST_RATE_LIMIT", 60, { min: 1 }), SIGN_WINDOW_MS);
+
+/**
+ * 读整数环境变量并卡住合法范围。
+ *
+ * 为什么要自检：env 直接喂给 Number() 的话，配成 0 / 负数 / 非数字会被
+ * 转成 0 / NaN——这俩对 SIGN_DEADLINE_SECONDS 是灾难：
+ *  - 0 → deadline = now → 用户提交就吃 SignatureExpired
+ *  - 负数 → deadline = 1970 → 永远过期
+ *  - NaN → 上面两种之一
+ *  限流阈值同理：配 0 = 所有人立刻 429。
+ *
+ * 策略：非法回默认 + warn。宁可让「配错」的服务用上安全值，**也不**让服务
+ * 用「看起来在跑但所有请求都被拒」的状态——后者没报错却没服务，最难排查。
+ */
+/**
+ * export 仅供单测：source 参数让它能脱离真实 env 跑断言。
+ * 业务调用走默认（=模块级 env）。
+ */
+export function numEnv(
+  key: string,
+  fallback: number,
+  opts: { min?: number; max?: number } = {},
+  source: Record<string, string> = env,
+): number {
+  const raw = source[key];
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < (opts.min ?? -Infinity) || n > (opts.max ?? Infinity)) {
+    if (isMain) {
+      console.warn(
+        `⚠️  ${key}=${JSON.stringify(raw)} 非法（需 ${opts.min ?? "-∞"}..${opts.max ?? "+∞"} 有限数）` +
+          `，回退为 ${fallback}`,
+      );
+    }
+    return fallback;
+  }
+  return n;
+}
 
 /** 签名有效窗口（秒）：防永久有效签名，用户须在此窗口内完成 mint */
-const SIGN_DEADLINE_SECONDS = Number(env.SIGN_DEADLINE_SECONDS ?? 3600);
+const SIGN_DEADLINE_SECONDS = numEnv("SIGN_DEADLINE_SECONDS", 3600, { min: 1, max: 365 * 24 * 3600 });
 
 function tooMany(req: IncomingMessage, res: ServerResponse, limiter: RateLimiter, ip: string) {
   const r = limiter.hit(ip);
@@ -291,7 +329,7 @@ export function resetArtIndex(): void {
  * 现在还多了一层影响：同钱包的锁会被一直占着，后续 /sign 全排队等死。
  * 超时 → null → 走既有的 fail-closed 分支（503）。
  */
-const RPC_QUERY_TIMEOUT_MS = Number(env.RPC_QUERY_TIMEOUT_MS ?? 8000);
+const RPC_QUERY_TIMEOUT_MS = numEnv("RPC_QUERY_TIMEOUT_MS", 8000, { min: 100 });
 
 /**
  * 是否信任反向代理带来的 X-Forwarded-For。默认 false：限流键只认真实
