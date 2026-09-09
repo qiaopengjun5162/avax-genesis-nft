@@ -25,7 +25,9 @@ export const fuji = defineChain({
   name: "Avalanche Fuji",
   nativeCurrency: { name: "AVAX", symbol: "AVAX", decimals: 18 },
   rpcUrls: {
-    default: { http: [fujiRpcPrimary] },
+    // 主 + fallback 都放进 default：RainbowKit 内部切网/读操作只取
+    // rpcUrls.default.http，主节点限流时也能打到 fallback，不只在 transport 层
+    default: { http: [fujiRpcPrimary, FUJI_RPC_FALLBACK] },
   },
   blockExplorers: {
     default: { name: "Avascan (Fuji)", url: "https://testnet.avascan.info/blockchain/c" },
