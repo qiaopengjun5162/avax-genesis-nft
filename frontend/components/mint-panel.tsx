@@ -17,6 +17,7 @@ const REVERT_HINTS: Array<{ sel: string; hint: string }> = [
   { sel: "0x900bb2c9", hint: "这个签名已经上链过了（同一签名只能用一次），请重新点 Mint 要一个新签名" },
   { sel: "0x06290e4e", hint: "mint 还没开始（合约 Waiting 状态）" },
   { sel: "0x8a164f63", hint: "供给已满（1000/1000）" },
+  { sel: "0x552ea2c6", hint: "付款不足：合约 price() 要求付 AVAX，请给钱包充值测试币后重试" }, // EtherAmountMismatch
   // 后续合约定性调整带来的新错误（v3+）——cast sig -- 验证过
   { sel: "0xd7d248ba", hint: "mint 已被 owner 暂停（合约 Paused 状态），等恢复" }, // MintPaused
   { sel: "0x9be4ff54", hint: "图 URL 是空的——请选一张图或留空让后端分配" }, // EmptyImageURI
@@ -31,6 +32,13 @@ function humanizeError(e: unknown): string {
   }
   const first = (e instanceof Error ? e.message : String(e)).split("\n")[0] ?? "未知错误";
   return first.length > 160 ? `${first.slice(0, 160)}…` : first;
+}
+
+/** 钱包里点了「拒绝」（code 4001 / UserRejectedRequestError）—— 不算链上失败 */
+function isUserRejection(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  const blob = `${e.name} ${e.message} ${(e as { shortMessage?: string }).shortMessage ?? ""}`;
+  return /user rejected|userrejectedrequesterror|4001/i.test(blob);
 }
 
 type Quota = {
@@ -62,7 +70,7 @@ function fmtExpiry(sec: number | null | undefined): string {
  *  ② 选图：留空 = 后端分配创世图；填 URL = 自己的图
  *  ③ POST /sign → {imageURI, deadline, signature} → 调合约 mint(imageURI, deadline, signature)
  */
-export default function MintPanel() {
+export default function MintPanel({ priceWei = 0n }: { priceWei?: bigint }) {
   const { address, isConnected, chainId } = useAccount();
   const { writeContractAsync } = useWriteContract();
 
@@ -181,7 +189,10 @@ export default function MintPanel() {
         abi: genesisMintAbi,
         functionName: "mint",
         args: [data.imageURI, data.deadline as number, data.signature as `0x${string}`],
-        value: 0n,
+        // value 必须等于链上 price()：合约 mint 是 payable 且 `if (msg.value < price)
+        // revert EtherAmountMismatch`。之前硬编码 0n，owner 一旦 setPrice 设价 mint
+        // 必失败。price 由 page 读链上 price 传入，与展示一致。
+        value: priceWei,
       });
       setTxHash(hash);
     } catch (e) {
@@ -189,6 +200,9 @@ export default function MintPanel() {
       // 人话化只会得到「The user aborted a request」这种没头没尾的
       if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")) {
         setError("请求超时：签名服务 20 秒内没回（后端可能挂了或链上 RPC 卡着），重试一次");
+      } else if (isUserRejection(e)) {
+        // 钱包里点了「拒绝」：不算失败，提示一下即可，按钮已在 finally 里恢复可重点
+        setError("你取消了签名/交易（钱包里点了拒绝）。要 mint 就再点一次 Mint。");
       } else {
         setError(humanizeError(e));
       }
