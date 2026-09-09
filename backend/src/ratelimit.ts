@@ -18,14 +18,28 @@ export class RateLimiter {
   private buckets = new Map<string, { count: number; resetAt: number }>();
   private readonly max: number;
   private readonly windowMs: number;
+  /** 桶数量硬上限：超过就淘汰最老的，宁可牺牲计数精度也不让内存无上限 */
+  private readonly maxKeys: number;
+  private lastSweepAt = 0;
+  private warnedOverflow = false;
 
-  constructor(max: number, windowMs: number) {
+  constructor(max: number, windowMs: number, opts: { maxKeys?: number } = {}) {
     this.max = max;
     this.windowMs = windowMs;
+    this.maxKeys = opts.maxKeys ?? 50_000;
   }
 
-  /** 记一次命中：返回是否放行 + 剩余次数 + 距重置秒数 */
+  /**
+   * 记一次命中：返回是否放行 + 剩余次数 + 距重置秒数。
+   *
+   * 惰性清扫：桶过了窗口就永远不会被读到，不回收的话 Map 会随「来访过的
+   * 不同 IP 数」单调增长——限流本身反而成了内存 DoS 面。每窗口最多扫一次
+   * （O(n)），key 数超阈值时立刻扫，避免突发流量把 Map 撑大。
+   */
   hit(key: string, now = Date.now()): RateLimitResult {
+    if (this.buckets.size > 0 && (now - this.lastSweepAt >= this.windowMs || this.buckets.size >= this.maxKeys)) {
+      this.sweep(now);
+    }
     const b = this.buckets.get(key);
     if (!b || now >= b.resetAt) {
       this.buckets.set(key, { count: 1, resetAt: now + this.windowMs });
@@ -40,6 +54,31 @@ export class RateLimiter {
     }
     b.count += 1;
     return { allowed: true, remaining: this.max - b.count, retryAfterSec: 0 };
+  }
+
+  /** 清掉已过期的桶；仍超限则按插入顺序淘汰最老的（Map 保序） */
+  private sweep(now: number): void {
+    this.lastSweepAt = now;
+    for (const [k, b] of this.buckets) {
+      if (now >= b.resetAt) this.buckets.delete(k);
+    }
+    if (this.buckets.size <= this.maxKeys) return;
+    // 同一窗口内涌进海量不同 IP：清扫不掉，只能淘汰。代价是最老的桶计数
+    // 归零（限流对它们临时放宽），换来的是内存有界——OOM 比放宽糟得多。
+    let overflow = this.buckets.size - this.maxKeys;
+    for (const k of this.buckets.keys()) {
+      if (overflow-- <= 0) break;
+      this.buckets.delete(k);
+    }
+    if (!this.warnedOverflow) {
+      this.warnedOverflow = true;
+      console.warn(`⚠️  限流 key 数超过 ${this.maxKeys}，已淘汰最老的桶（疑似 IP 泛洪扫描）`);
+    }
+  }
+
+  /** 当前桶数量（测试 / 排障用） */
+  get size(): number {
+    return this.buckets.size;
   }
 
   /** 测试用：清空所有状态 */

@@ -24,9 +24,13 @@ export class InflightSlots {
   /** wallet → (slotId → 到期 unix 秒) */
   private readonly slots = new Map<string, Map<number, number>>();
   private nextId = 1;
+  private claimsSinceSweep = 0;
 
   /** 占位，返回归还句柄 */
   claim(wallet: string, expiresAtSec: number): Slot {
+    // count() 只清「被查询的那个钱包」的过期槽位：用户签完就再没回来过，
+    // 那笔记录会一直躺着。定期全局扫一遍才收得掉。
+    if (++this.claimsSinceSweep >= 64) this.sweep();
     let m = this.slots.get(wallet);
     if (!m) {
       m = new Map<number, number>();
@@ -60,6 +64,30 @@ export class InflightSlots {
     }
     if (bucket.size === 0) this.slots.delete(wallet);
     return n;
+  }
+
+  /**
+   * 全局清扫：回收所有已过期槽位（含从没人再查过的钱包），返回清掉的个数。
+   * 单进程签名服务的钱包数有限，O(n) 全扫很便宜。
+   */
+  sweep(nowSec: number = Math.floor(Date.now() / 1000)): number {
+    this.claimsSinceSweep = 0;
+    let removed = 0;
+    for (const [wallet, bucket] of this.slots) {
+      for (const [id, exp] of bucket) {
+        if (exp <= nowSec) {
+          bucket.delete(id);
+          removed += 1;
+        }
+      }
+      if (bucket.size === 0) this.slots.delete(wallet);
+    }
+    return removed;
+  }
+
+  /** 当前有多少个钱包占着槽位（测试 / 排障用） */
+  get walletCount(): number {
+    return this.slots.size;
   }
 
   /** 测试用：清空全部状态 */
