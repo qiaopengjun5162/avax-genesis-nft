@@ -73,7 +73,8 @@ backend/              Node 22 原生 TS，零运行时依赖（仅 ethers）
 
 contracts/
   src/GenesisMint.sol ERC721A + ECDSA + 自定义错误
-  test/GenesisMint.t.sol   32 个 forge 测试（覆盖 100%）
+  test/GenesisMint.t.sol   35 个 forge 测试（src/GenesisMint.sol 行/语句/分支/函数均 100%；
+                           部署脚本 DeployGenesisMint.s.sol 不在覆盖统计内）
   script/DeployGenesisMint.s.sol  Fuji 部署脚本
   script/gen-abi.sh    重新生成前端 ABI 的小工具
 
@@ -201,12 +202,17 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 |---|---|---|---|
 | 合约 | forge | **35** 全过 | `forge test --force` |
 | 合约 lint | forge lint | 0 警告 | `forge lint` |
-| 合约覆盖率 | lcov | 100% (L/S/B/F) | `forge coverage` |
+| 合约覆盖率 | lcov | src/GenesisMint.sol 100% (L/S/B/F) | `forge coverage --report summary` |
 | 后端 | node:test | **66** 全过 | `cd backend && npm test` |
+| 后端冒烟 | curl（真实进程） | 13 项断言 | `bash backend/script/smoke.sh`（`SMOKE_SIGN=1` 额外真签一次） |
 | 前端 | tsc | 类型检查 | `cd frontend && npx tsc --noEmit` |
 | 前端 | eslint | 0 error | `cd frontend && npm run lint` |
 
 CI：`.github/workflows/ci.yml`，push / PR 到 `main` 触发三 job 并行。
+
+后端冒烟脚本与单测的分工：单测用 fixture 私钥、不打链、不占端口；冒烟跑的是
+**真实进程 + 真实 `.env` + 真实 RPC**，专门验证「起得来、路由对、CORS/限流/413 这些
+横切逻辑在真实 HTTP 栈上生效」。单测覆盖不到的正是这一层。
 
 ---
 
