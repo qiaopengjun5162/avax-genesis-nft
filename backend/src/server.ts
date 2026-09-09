@@ -634,6 +634,40 @@ export function gracefulShutdown(
   timer.unref?.();
 }
 
+/**
+ * 进程级兜底：任何未捕获异常 / 未处理 promise reject 都不该让进程静默崩
+ * 在不明处（Node 默认对 unhandledRejection 直接终止进程，日志只有 promise
+ * 细节、没有业务上下文，systemd 只会记成一次失败重启）。
+ *
+ * 策略分两种：
+ *  - uncaughtException：进程状态可能已损坏，记日志 + 退出，交给 systemd /
+ *    容器重启策略拉起（比带病运行安全）。
+ *  - unhandledRejection：只记日志、不退出。它可能是某次瞬态 reject（比如
+ *    某个依赖库内部的一次性 reject），为一个点杀掉整个签名服务代价太大；
+ *    但必须记下来让运维看到、按需重启。
+ *
+ * 抽成可注入函数便于单测：默认用真实 process，测试里传假 proc 不碰真进程。
+ */
+type GuardProc = { on(event: string, listener: (...args: unknown[]) => void): void };
+export function installProcessGuard(
+  opts: {
+    log?: (msg: string) => void;
+    exit?: (code: number) => void;
+    proc?: GuardProc;
+  } = {},
+): void {
+  const log = opts.log ?? ((m: string) => console.error(m));
+  const exit = opts.exit ?? ((code: number) => process.exit(code));
+  const proc = opts.proc ?? (process as unknown as GuardProc);
+  proc.on("uncaughtException", (err: unknown) => {
+    log(`💥 uncaughtException: ${err instanceof Error ? err.message : String(err)}`);
+    exit(1);
+  });
+  proc.on("unhandledRejection", (reason: unknown) => {
+    log(`⚠️ unhandledRejection: ${reason instanceof Error ? reason.message : String(reason)}`);
+  });
+}
+
 /** 启动自检：本服务私钥 ↔ 链上 signer，对不上当场告警（最隐蔽故障） */
 async function selfCheck() {
   const onChain = await signerOnChain();
@@ -672,6 +706,20 @@ if (isMain && signer) {
 
   const server = createServer((req, res) => {
     void handler(req, res);
+  });
+
+  // 进程级兜底：未捕获异常 / 未处理 reject 都不会让进程静默崩在不明处
+  installProcessGuard();
+
+  // 端口占用：listen 的 error 事件不处理时，Node 会把它当未捕获异常直接
+  // throw，表现为「进程启动后无声退出」。明确报错再退出，运维一眼定位。
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(`❌ 端口 ${PORT} 已被占用，无法启动（另一个实例在跑？先停掉或改 PORT）`);
+    } else {
+      console.error(`❌ 监听失败：${err.message}`);
+    }
+    process.exit(1);
   });
   server.listen(PORT, "127.0.0.1");
 

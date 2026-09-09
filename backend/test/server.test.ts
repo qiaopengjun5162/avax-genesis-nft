@@ -15,6 +15,7 @@ import {
   gracefulShutdown,
   numEnv,
   rpcHealth,
+  installProcessGuard,
   type ClosableServer,
 } from "../src/server.ts";
 import { type Allowlist } from "../src/allowlist.ts";
@@ -788,4 +789,44 @@ test("gracefulShutdown: 到点还没关完 → 强断所有连接并 exit 1", as
   assert.deepEqual(exits, [1], "超时必须退出，不能永远挂着");
   assert.ok(s.calls.includes("closeAllConnections"), "兜底要把在途连接也断掉");
   assert.ok(logs.some((m) => m.includes("强制关闭")), "要留下一条可排查的告警");
+});
+
+// ---- 进程级兜底（installProcessGuard）----
+
+test("installProcessGuard: 注册 uncaughtException + unhandledRejection 两个监听", () => {
+  const events: string[] = [];
+  installProcessGuard({
+    proc: { on: (ev: string) => events.push(ev) } as never,
+    exit: () => {},
+  });
+  assert.ok(events.includes("uncaughtException"), "必须接管 uncaughtException");
+  assert.ok(events.includes("unhandledRejection"), "必须接管 unhandledRejection");
+});
+
+test("installProcessGuard: uncaughtException 记录并退出（状态可能已损坏）", () => {
+  let logMsg = "";
+  let exitCode: number | undefined;
+  const handlers: Record<string, (...a: unknown[]) => void> = {};
+  installProcessGuard({
+    proc: { on: (ev: string, cb: (...a: unknown[]) => void) => (handlers[ev] = cb) } as never,
+    log: (m) => (logMsg = m),
+    exit: (c) => (exitCode = c),
+  });
+  handlers["uncaughtException"]!(new Error("boom"));
+  assert.match(logMsg, /uncaughtException/, "要留下可排查的日志");
+  assert.equal(exitCode, 1, "状态不可信，必须退出让 systemd 重启");
+});
+
+test("installProcessGuard: unhandledRejection 只记录不退出（单点不杀全服务）", () => {
+  let logMsg = "";
+  let exitCalled = false;
+  const handlers: Record<string, (...a: unknown[]) => void> = {};
+  installProcessGuard({
+    proc: { on: (ev: string, cb: (...a: unknown[]) => void) => (handlers[ev] = cb) } as never,
+    log: (m) => (logMsg = m),
+    exit: () => (exitCalled = true),
+  });
+  handlers["unhandledRejection"]!("some-reason");
+  assert.match(logMsg, /unhandledRejection/, "要留下可排查的日志");
+  assert.equal(exitCalled, false, "unhandledRejection 不该退出，否则一个 reject 杀掉整服务");
 });
