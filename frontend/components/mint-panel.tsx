@@ -45,7 +45,16 @@ type Quota = {
    * 所以会出现「已领 0 但按钮禁用」——不显示 pending 用户会以为坏了。
    */
   pending?: number;
+  /** 白名单资格是否已到期（后端 expiresAt 判定） */
+  expired?: boolean;
+  /** 到期时间（unix 秒），null = 永不过期 */
+  expiresAt?: number | null;
 };
+
+function fmtExpiry(sec: number | null | undefined): string {
+  if (!sec) return "";
+  return new Date(sec * 1000).toLocaleString("zh-CN", { hour12: false });
+}
 
 /**
  * mint 三幕剧（v3：签名按次授权，同一钱包可 mint 多张，每张可自选图）：
@@ -170,6 +179,9 @@ export default function MintPanel() {
   );
   // 有签名在飞：后端预留了名额，签名过期（默认 1h）或上链后自动释放
   const pending = quota?.pending ?? 0;
+  // 资格到期：后端此时 allowlisted 也是 false，但原因不同——不说清楚用户会
+  // 以为「我没在名单里」，其实是「曾经在，过期了」
+  const quotaExpired = Boolean(quota?.expired);
 
   return (
     <div className="space-y-4">
@@ -180,16 +192,20 @@ export default function MintPanel() {
       {quota && (
         <div
           className={`rounded-lg px-3 py-2 text-sm ${
-            quota.allowlisted
-              ? quotaUnknown
-                ? "bg-yellow-50 text-yellow-800"
-                : quotaDone
-                  ? "bg-gray-100 text-gray-600"
-                  : "bg-green-50 text-green-800"
-              : "bg-red-50 text-red-700"
+            quotaExpired
+              ? "bg-amber-50 text-amber-800"
+              : quota.allowlisted
+                ? quotaUnknown
+                  ? "bg-yellow-50 text-yellow-800"
+                  : quotaDone
+                    ? "bg-gray-100 text-gray-600"
+                    : "bg-green-50 text-green-800"
+                : "bg-red-50 text-red-700"
           }`}
         >
-          {quota.allowlisted
+          {quotaExpired
+            ? `⌛ 白名单资格已于 ${fmtExpiry(quota.expiresAt)} 过期（原可领 ${quota.limit} 张）——联系运营续期`
+            : quota.allowlisted
             ? quotaUnknown
               ? "⏳ 配额核验中（链上 RPC 不可达），稍后刷新或换节点再试"
               : quotaDone
@@ -198,7 +214,7 @@ export default function MintPanel() {
                   : `✅ 配额已用完（${quota.minted}/${quota.limit}）——想继续可联系加配额`
                 : `✅ 在白名单：已领 ${quota.minted} / 可领 ${quota.limit} 张` +
                   (pending > 0 ? `（${pending} 张签名待上链，名额已预留）` : "")
-            : "⚠ 钱包不在白名单——签名服务会拒绝（后端 data/allowlist.json 加地址后重启）"}
+              : "⚠ 钱包不在白名单——签名服务会拒绝（后端 data/allowlist.json 加地址后重启）"}
         </div>
       )}
 
@@ -217,18 +233,20 @@ export default function MintPanel() {
 
       <button
         className={btnPrimary}
-        disabled={busy !== null || wrongChain || quotaDone || quotaUnknown}
+        disabled={busy !== null || wrongChain || quotaDone || quotaUnknown || quotaExpired}
         onClick={onMint}
       >
         {busy === "signing"
           ? "① 向后端要签名…"
           : busy === "mining"
             ? "② 提交链上交易…"
-            : quotaUnknown
-              ? "⏳ 链上配额核验中"
-              : quotaDone
-                ? "配额已用完"
-                : "✨ Mint 一张 Genesis NFT"}
+            : quotaExpired
+              ? "⌛ 资格已过期"
+              : quotaUnknown
+                ? "⏳ 链上配额核验中"
+                : quotaDone
+                  ? "配额已用完"
+                  : "✨ Mint 一张 Genesis NFT"}
       </button>
 
       {error && (
