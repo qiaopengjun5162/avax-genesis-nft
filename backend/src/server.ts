@@ -366,7 +366,14 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
     const alMatch = url.pathname.match(/^\/allowlist\/(0x[0-9a-fA-F]{40})$/);
     if (req.method === "GET" && alMatch) {
       if (tooMany(req, res, allowlistLimiter, clientIp(req, { trustProxy: TRUST_PROXY }))) return;
-      const wallet = ethers.getAddress(alMatch[1]);
+      // 与 /sign 同一套校验：混合大小写且 checksum 对不上时 getAddress 会抛，
+      // 不接住就成了 500——客户端错误被报成服务端错误，还白扣一次限流额度。
+      let wallet: string;
+      try {
+        wallet = ethers.getAddress(alMatch[1]);
+      } catch {
+        return send(req, res, 400, { error: "invalid wallet address" });
+      }
       const entry = entryFor(wallet, _allowlist);
       const expired = isExpired(entry);
       // 不在白名单 → minted/remaining=0；有配额但 RPC 不可达 → null（前端按"未知"处理）
@@ -503,7 +510,11 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
     if (e instanceof SyntaxError) {
       return send(req, res, 400, { error: "body 不是合法 JSON" });
     }
-    return send(req, res, 500, { error: String(e) });
+    // 500 只回通用文案：String(e) 里可能有文件路径、RPC URL、堆栈片段——
+    // 那是日志该记的，不是响应该给的。详情留在服务端，靠访问日志里的
+    // 时间/路径去对。
+    console.error(`💥 未捕获异常 ${req.method} ${(req.url ?? "").split("?")[0]}`, e);
+    return send(req, res, 500, { error: "内部错误" });
   }
 }
 

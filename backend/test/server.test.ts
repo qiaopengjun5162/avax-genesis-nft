@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -612,6 +612,44 @@ test("artIndex: 重启后读回的水位线继续递增（不退回撞图）", a
   // 模拟重启：水位线从盘上读回，此时链上总量仍是 5（上一张还没上链）
   const resumed = load(p);
   assert.equal(Math.max(5, resumed + 1), 8, "必须接着 7 往后走，而不是回到 5+1=6");
+});
+
+// ---- 错误码口径 ----
+
+test("server: /allowlist 地址 checksum 非法 → 400（不是 500）", async () => {
+  // /sign 早就对这种输入返回 400，/allowlist 却让 getAddress 的异常漏到
+  // 兜底 catch → 500。客户端错误被报成服务端错误，排障方向直接跑偏，
+  // 还白扣一次限流额度。
+  const good = ethers.getAddress("0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+  const i = good.split("").findIndex((c, idx) => idx > 1 && /[a-f]/i.test(c));
+  const flipped =
+    good[i] === good[i].toLowerCase() ? good[i].toUpperCase() : good[i].toLowerCase();
+  const bad = good.slice(0, i) + flipped + good.slice(i + 1);
+  assert.throws(() => ethers.getAddress(bad), "前提：构造出的地址确实 checksum 非法");
+
+  const res = mockRes();
+  await handler(getAllowlist(bad, "9.9.9.1"), res);
+  assert.equal(res.statusCode, 400);
+  assert.match(res._body, /wallet/);
+});
+
+test("server: 未捕获异常只回通用文案，不把内部细节吐给客户端", async () => {
+  const quiet = mock.method(console, "error", () => {});
+  try {
+    const res = mockRes();
+    await handler(postSign({ wallet: ANVIL_ADDR_0 }, "9.9.9.2"), res, {
+      signer: new ethers.Wallet(ANVIL_KEY_0),
+      allowlist: { [ANVIL_ADDR_0]: { limit: 3 } } as Allowlist,
+      numberMintedOnChain: async () => {
+        throw new Error("RPC_URL=https://user:secret@example.com ENOENT /etc/passwd");
+      },
+    });
+    assert.equal(res.statusCode, 500);
+    assert.equal(JSON.parse(res._body).error, "内部错误");
+    assert.ok(!res._body.includes("secret"), "内部细节只能进日志，不能进响应");
+  } finally {
+    quiet.mock.restore();
+  }
 });
 
 // ---- 优雅关闭 ----
