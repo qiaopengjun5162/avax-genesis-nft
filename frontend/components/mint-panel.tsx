@@ -72,6 +72,12 @@ export default function MintPanel() {
   const [customUri, setCustomUri] = useState("");
   const [artPreview, setArtPreview] = useState<string | null>(null);
   const [txHash, setTxHash] = useState<string | null>(null);
+  /**
+   * 后端整体不可用（没起 / 5xx / 网络不可达）。此时 /allowlist 拿不到配额，
+   * 之前是静默吞掉 → 用户还能点 Mint 撞 503。现在显式标出来并禁用按钮，
+   * 让 fail-closed 在前端也可见：连不上后端就不该让人去签。
+   */
+  const [serviceDown, setServiceDown] = useState(false);
 
   const { data: receipt } = useWaitForTransactionReceipt({ hash: txHash as `0x${string}` | undefined });
   const txOk = receipt?.status === "success";
@@ -88,9 +94,17 @@ export default function MintPanel() {
       const r = await fetch(`${SIGNER_URL}/allowlist/${address}`, {
         signal: AbortSignal.timeout(15_000),
       });
-      if (r.ok) setQuota(await r.json());
+      if (r.ok) {
+        setQuota(await r.json());
+        setServiceDown(false); // 后端这轮给到了配额 → 恢复
+      } else {
+        // 后端返回错误（503 fail-closed / 429 限流等）：标记服务异常，
+        // 该轮禁用 Mint，避免用户撞 503 才发现问题
+        setServiceDown(true);
+      }
     } catch {
-      /* 后端没起 / 超时：静默，下一轮继续试 */
+      // 后端没起 / 超时 / 网络不可达：同样视为服务不可用
+      setServiceDown(true);
     }
   }, [address]);
 
@@ -124,6 +138,7 @@ export default function MintPanel() {
     setError(null);
     setArtPreview(null);
     setTxHash(null);
+    setServiceDown(false);
   }, [address]);
 
   async function onMint() {
@@ -211,11 +226,19 @@ export default function MintPanel() {
   // 资格到期：后端此时 allowlisted 也是 false，但原因不同——不说清楚用户会
   // 以为「我没在名单里」，其实是「曾经在，过期了」
   const quotaExpired = Boolean(quota?.expired);
+  // 后端整体不可用（没起 / 5xx / 网络不可达）：fail-closed 在前端也可见
+  const backendDown = serviceDown;
 
   return (
     <div className="space-y-4">
       {wrongChain && (
         <p className="text-sm font-medium text-red-600">⚠ 当前链不是 Fuji，mint 会失败——请切到 Avalanche Fuji。</p>
+      )}
+
+      {backendDown && (
+        <p className="rounded-lg bg-yellow-50 p-3 text-sm text-yellow-800">
+          ⏳ 签名服务暂时连不上（后端没启动 / 报错 / 网络不可达），连上后会自动恢复——稍等或检查后端进程。
+        </p>
       )}
 
       {quota && (
@@ -262,20 +285,22 @@ export default function MintPanel() {
 
       <button
         className={btnPrimary}
-        disabled={busy !== null || wrongChain || quotaDone || quotaUnknown || quotaExpired}
+        disabled={busy !== null || wrongChain || quotaDone || quotaUnknown || quotaExpired || backendDown}
         onClick={onMint}
       >
         {busy === "signing"
           ? "① 向后端要签名…"
           : busy === "mining"
             ? "② 提交链上交易…"
-            : quotaExpired
-              ? "⌛ 资格已过期"
-              : quotaUnknown
-                ? "⏳ 链上配额核验中"
-                : quotaDone
-                  ? "配额已用完"
-                  : "✨ Mint 一张 Genesis NFT"}
+            : backendDown
+              ? "⏳ 签名服务不可用"
+              : quotaExpired
+                ? "⌛ 资格已过期"
+                : quotaUnknown
+                  ? "⏳ 链上配额核验中"
+                  : quotaDone
+                    ? "配额已用完"
+                    : "✨ Mint 一张 Genesis NFT"}
       </button>
 
       {error && (
