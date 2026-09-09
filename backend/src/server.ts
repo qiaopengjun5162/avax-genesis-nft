@@ -12,7 +12,7 @@
  * 运行：node src/server.ts   （Node ≥22，需 --experimental-strip-types，见 package.json start）
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { ethers } from "ethers";
@@ -228,15 +228,26 @@ function validUserImage(uri: string): boolean {
 /**
  * 就绪探针用的 RPC 健康度：3s 超时 + 15s 缓存，避免被高频探针反复打 RPC。
  * RPC 不通返回 degraded，但服务仍存活（与启动自检的降级策略一致）。
+ *
+ * provider 用**单例**：每调一次 new 一个 JsonRpcProvider 等于开一条连接池，
+ * 15s 缓存未命中就泄漏一条——长跑之后 fd / 连接慢慢堆积，最终拖垮进程。
+ * 复用同一个实例，连接池归它管、能被复用与复用后回收。
  */
-let rpcHealthCache: { at: number; reachable: boolean; blockNumber: number | null } | null = null;
-async function rpcHealth(): Promise<{ reachable: boolean; blockNumber: number | null }> {
+let rpcHealthCache: { provider: unknown; at: number; reachable: boolean; blockNumber: number | null } | null = null;
+const rpcHealthProvider = new ethers.JsonRpcProvider(FUJI_RPC);
+
+/** 注入 provider 仅用于单测：默认 = 模块级单例（真链） */
+export async function rpcHealth(
+  provider: { getBlockNumber: () => Promise<number> } = rpcHealthProvider,
+): Promise<{ reachable: boolean; blockNumber: number | null }> {
   const now = Date.now();
-  if (rpcHealthCache && now - rpcHealthCache.at < 15_000) return rpcHealthCache;
+  // 同 provider 且在窗口内才命中缓存——注入测试 provider 时不会被真链结果串味
+  if (rpcHealthCache && rpcHealthCache.provider === provider && now - rpcHealthCache.at < 15_000) {
+    return rpcHealthCache;
+  }
   let reachable = false;
   let blockNumber: number | null = null;
   try {
-    const provider = new ethers.JsonRpcProvider(FUJI_RPC);
     blockNumber = await Promise.race([
       provider.getBlockNumber(),
       new Promise<never>((_, rej) => setTimeout(() => rej(new Error("rpc timeout")), 3000)),
@@ -245,7 +256,7 @@ async function rpcHealth(): Promise<{ reachable: boolean; blockNumber: number | 
   } catch {
     /* RPC 不通：服务仍存活，标记为 degraded */
   }
-  rpcHealthCache = { at: now, reachable, blockNumber };
+  rpcHealthCache = { provider, at: now, reachable, blockNumber };
   return rpcHealthCache;
 }
 
@@ -288,10 +299,17 @@ export function loadArtIndex(path: string = ART_INDEX_FILE): number {
   }
 }
 
-/** 落盘水位线。写失败只 warn：图序号重复是「铸出重复图」，服务不该因此挂掉 */
-function persistArtIndex(n: number, path: string = ART_INDEX_FILE): void {
+/**
+ * 落盘水位线。写失败只 warn：图序号重复是「铸出重复图」，服务不该因此挂掉。
+ *
+ * 用「临时文件 + rename」原子替换：rename 在同一文件系统上是原子操作，
+ * 不会出现「写到一半被 kill → 文件里是半截数字 → 重启读回 -1 → 重发旧图」
+ * 的情况。先落盘到 .tmp，再 rename 覆盖正式文件。
+ */
+export function persistArtIndex(n: number, path: string = ART_INDEX_FILE): void {
   try {
-    writeFileSync(path, String(n));
+    writeFileSync(`${path}.tmp`, String(n));
+    renameSync(`${path}.tmp`, path);
   } catch (e) {
     console.warn(`⚠️  图序号水位线落盘失败，重启后可能重复发图：${(e as Error).message}`);
   }

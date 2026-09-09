@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mock, test } from "node:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ethers } from "ethers";
@@ -11,8 +11,10 @@ import {
   nextArtIndex,
   resetArtIndex,
   loadArtIndex,
+  persistArtIndex,
   gracefulShutdown,
   numEnv,
+  rpcHealth,
   type ClosableServer,
 } from "../src/server.ts";
 import { type Allowlist } from "../src/allowlist.ts";
@@ -85,6 +87,33 @@ test("server: GET /healthz 返回 ok 且结构正确", async () => {
 test("server: 未知路径返回 404", async () => {
   const { code } = await call("GET", "/nope");
   assert.equal(code, 404);
+});
+
+test("rpcHealth: 复用同一 provider，缓存窗口内只打一次 RPC（不泄漏连接池）", async () => {
+  // 曾经每次都 new JsonRpcProvider → 15s 缓存未命中就泄漏一条连接池。
+  // 改为单例 + 缓存命中时直接返回，同一个 provider 在窗口内只查一次链。
+  let calls = 0;
+  const fake = { getBlockNumber: async () => { calls += 1; return 12345; } } as any;
+  const r1 = await rpcHealth(fake);
+  const r2 = await rpcHealth(fake); // 同 provider，窗口内 → 命中缓存
+  assert.equal(r1.reachable, true);
+  assert.equal(r1.blockNumber, 12345);
+  assert.equal(calls, 1, "15s 缓存窗口内只打一次 RPC");
+  assert.deepEqual(r1, r2, "命中缓存应返回同一对象");
+});
+
+test("rpcHealth: RPC 不通返回 degraded 但仍是合法结构（服务不崩）", async () => {
+  let calls = 0;
+  const fake = {
+    getBlockNumber: async () => {
+      calls += 1;
+      throw new Error("ECONNREFUSED");
+    },
+  } as any;
+  const r = await rpcHealth(fake);
+  assert.equal(r.reachable, false);
+  assert.equal(r.blockNumber, null);
+  assert.equal(typeof r.reachable, "boolean");
 });
 
 test("server: OPTIONS 预检返回 204", async () => {
@@ -635,6 +664,21 @@ test("artIndex: 重启后读回的水位线继续递增（不退回撞图）", a
   // 模拟重启：水位线从盘上读回，此时链上总量仍是 5（上一张还没上链）
   const resumed = load(p);
   assert.equal(Math.max(5, resumed + 1), 8, "必须接着 7 往后走，而不是回到 5+1=6");
+});
+
+test("artIndex: 水位线原子落盘——临时文件被重命名，不留 .tmp 残留", async () => {
+  const p = join(mkdtempSync(join(tmpdir(), "artidx-")), ".art-index");
+  persistArtIndex(42, p);
+  assert.equal(readFileSync(p, "utf8").trim(), "42", "正式文件落成了正确内容");
+  // rename 是原子的：要么 .tmp 还在、要么已被改名覆盖，绝不会「长留一个 .tmp」
+  let tmpLeft = false;
+  try {
+    readFileSync(`${p}.tmp`, "utf8");
+    tmpLeft = true;
+  } catch {
+    /* 没有 .tmp 是正确结果 */
+  }
+  assert.equal(tmpLeft, false, "原子替换后不应残留临时文件");
 });
 
 // ---- 错误码口径 ----
