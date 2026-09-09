@@ -362,6 +362,28 @@ test("artIndex: 链上总量不动时也严格递增", () => {
   resetArtIndex();
 });
 
+test("server: /sign 不传 imageURI 时 totalSupply 不可达 → 503（fail-closed）", async () => {
+  // 关键的「序号撞车会铸出两张完全相同的 NFT」是因为 RPC 半通：numberMinted
+  // 读得到、totalSupply 读不到。回退 (?? 0) 会让 nextArtIndex 退到水位线之下，
+  // 撞到之前发过的图——合约 usedHashes 键含 deadline，去重挡不住。
+  // 改成与 numberMinted 同一套口径：读不到 → null → 503。
+  resetArtIndex();
+  const res = mockRes();
+  await handler(postSign({ wallet: ANVIL_ADDR_0 }, "9.9.9.3"), res, {
+    signer: new ethers.Wallet(ANVIL_KEY_0),
+    allowlist: { [ANVIL_ADDR_0]: { limit: 3 } } as Allowlist,
+    numberMintedOnChain: async () => 0, // 这边正常
+    totalSupplyOnChain: async () => null, // 但 totalSupply 不可达
+  });
+  assert.equal(res.statusCode, 503);
+  assert.match(res._body, /总量|不可达/);
+  // 关键的副作用约束：水位线不应被推进——fail-closed 必须真的「不签」，
+  // 否则下次重启读回一个错序号，等于自己埋下撞图种子。
+  // 起始 -1：第一次 nextArtIndex(999) 应当走 max(999, 0) = 999
+  assert.equal(nextArtIndex(999), 999, "503 路径没动水位线，仍是从 -1 开始算");
+  resetArtIndex();
+});
+
 test("server: 同一钱包连签两次（都未上链）拿到两张不同的图", async () => {
   // 端到端验证上面那条：不传 imageURI → 后端自动分配创世图
   const inflight = new InflightSlots();

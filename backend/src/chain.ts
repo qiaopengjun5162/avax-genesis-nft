@@ -42,14 +42,19 @@ export async function signerOnChain(): Promise<string | null> {
 }
 
 /**
- * 总供给（用于自动分配创世图的序号 #N）。
- * 仅在用户没填 imageURI 时读取；签名接口对未知序号 fail-closed 太重，
- * 这里仍 swallow 成 0：图序号只是 SVG 文案，错了只是显示丑，不影响安全。
+ * 总供给（用于自动分配创世图的序号 #N），null = 读不到。
+ *
+ * 这里曾经 swallow 成 0，注释写着「图序号只是 SVG 文案，错了只是显示丑，
+ * 不影响安全」——**这个判断已被推翻**：序号撞车意味着 genesisArt(钱包, 序号)
+ * 算出同一张 data URI，而合约 usedHashes 的键含 deadline，换一个新 deadline
+ * 重新签就能绕过去重 → 同一个钱包真会铸出两张一模一样的 NFT。
+ *
+ * 所以与 numberMinted 同一套口径：读不到 → null → /sign 走 503 fail-closed。
  */
-export async function totalSupplyOnChain(): Promise<number> {
+export async function totalSupplyOnChain(): Promise<number | null> {
   try {
     return Number(await iface.totalSupply());
   } catch {
-    return 0;
+    return null;
   }
 }

@@ -219,8 +219,8 @@ export type HandlerDeps = {
   allowlist?: Allowlist;
   /** 注入签名钱包（默认 = 模块级 SIGNER_PRIVATE_KEY 派生） */
   signer?: ethers.Wallet | null;
-  /** 注入总供给读取（默认 = 真链读；测试用它隔离链上状态） */
-  totalSupplyOnChain?: () => Promise<number>;
+  /** 注入总供给读取（默认 = 真链读；null = RPC 不可达，测试用它隔离链上状态） */
+  totalSupplyOnChain?: () => Promise<number | null>;
   /** 注入 in-flight 槽位（默认 = 模块级；测试用它隔离并发状态） */
   inflight?: InflightSlots;
   /** 注入按钱包串行的锁（默认 = 模块级） */
@@ -469,10 +469,16 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
             if (typeof imageURI !== "string" || !validUserImage(imageURI)) {
               return send(req, res, 400, { error: "imageURI 非法：需 http(s)/ipfs/data:image 开头且 ≤500 字符" });
             }
-          } else {
-            const supply = (await withTimeout(_totalSupply(), RPC_QUERY_TIMEOUT_MS)) ?? 0;
-            finalUri = genesisArt(addr, nextArtIndex(supply));
+        } else {
+          // fail-closed：与 numberMinted 同一套口径——读不到 null → 503。
+          // 旧的 (?? 0) 会让序号退回到水位线之下，进而撞到之前发过的图：
+          // usedHashes 键含 deadline，新签名去重挡不住 → 同一钱包铸两张同图。
+          const supply = await withTimeout(_totalSupply(), RPC_QUERY_TIMEOUT_MS);
+          if (supply === null) {
+            return send(req, res, 503, { error: "链上总量核验失败（RPC 不可达），请稍后重试" });
           }
+          finalUri = genesisArt(addr, nextArtIndex(supply));
+        }
 
           const signature = await signMint(_signer, addr, finalUri, deadline);
           const recovered = recoverSigner(addr, finalUri, deadline, signature);
