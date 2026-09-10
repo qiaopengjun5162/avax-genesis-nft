@@ -203,8 +203,8 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 | 合约 | forge | **35** 全过 | `forge test --force` |
 | 合约 lint | forge lint | 0 警告 | `forge lint` |
 | 合约覆盖率 | lcov | src/GenesisMint.sol 100% (L/S/B/F) | `forge coverage --report summary` |
-| 后端 | node:test | **66** 全过 | `cd backend && npm test` |
-| 后端冒烟 | curl（真实进程） | 13 项断言 | `bash backend/script/smoke.sh`（`SMOKE_SIGN=1` 额外真签一次） |
+| 后端 | node:test | **85** 全过 | `cd backend && npm test` |
+| 后端冒烟 | curl（真实进程） | 13 项（默认）/ 15 项（`SMOKE_SIGN=1`） | `bash backend/script/smoke.sh`；换端口 `SMOKE_PORT=8792 bash backend/script/smoke.sh` |
 | 前端 | tsc | 类型检查 | `cd frontend && npx tsc --noEmit` |
 | 前端 | eslint | 0 error | `cd frontend && npm run lint` |
 
@@ -213,6 +213,12 @@ CI：`.github/workflows/ci.yml`，push / PR 到 `main` 触发三 job 并行。
 后端冒烟脚本与单测的分工：单测用 fixture 私钥、不打链、不占端口；冒烟跑的是
 **真实进程 + 真实 `.env` + 真实 RPC**，专门验证「起得来、路由对、CORS/限流/413 这些
 横切逻辑在真实 HTTP 栈上生效」。单测覆盖不到的正是这一层。
+
+冒烟有一条容易踩的坑：**端口被占时必须报错，不能给假绿灯**。若 8791 上已经跑着
+别的实例（比如开发时手动起的老进程），新进程会 `EADDRINUSE` 退出，而 13 项断言会
+全部打在那个旧实例上——全绿，实际一行新代码都没验到。所以脚本启动前先探测端口，
+被占就退出并提示换 `SMOKE_PORT`；就绪后再回查本进程日志里的监听行，确认应答的确实
+是自己刚起的那个。端口由脚本 `export` 给服务进程，不依赖 `.env` 里碰巧写的值。
 
 ---
 
