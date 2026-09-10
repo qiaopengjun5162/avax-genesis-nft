@@ -70,6 +70,13 @@ jobs:
         working-directory: frontend
         # 仅类型检查：next build 要启 webpack + 资源构建，拉慢 CI；
         # 真正的渲染 bug 留到 PR 前的本地 next build 兜底。
+        #
+        # 耗时说明：这一步慢在**读文件**，不是类型复杂。--extendedDiagnostics
+        # 显示 Check time 仅 0.58s，而 I/O Read 达 318s（3051 个文件 / 38 万行
+        # .d.ts，源自 wagmi/viem）。本机（沙盒 I/O 约 2MB/s）冷启动要 8 分钟；
+        # CI 机器 I/O 正常，快得多。别因为本机慢就去改类型——方向是错的。
+        # 本地若有 tsconfig.tsbuildinfo 增量缓存会快到几秒，那是假象：
+        # CI 是全新 checkout，没有这个缓存。
         run: npx tsc --noEmit
       - name: Lint
         working-directory: frontend

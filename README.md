@@ -210,6 +210,19 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 
 CI：`.github/workflows/ci.yml`，push / PR 到 `main` 触发三 job 并行。
 
+### 关于前端类型检查 / 构建的耗时（别被本地体感误导）
+
+前端这两个命令**慢在文件 I/O，不是类型复杂**。`npx tsc --noEmit --extendedDiagnostics`
+实测：`Check time` 只有 **0.58s**，而 `I/O Read time` 高达 **318s**（要读 3051 个文件 /
+38 万行 `.d.ts`，来自 wagmi / viem）。同一批 148MB 文件重复读两次分别要 64s / 97s
+（约 2 MB/s，且页缓存命中不了），而 `dd` 写 200MB 只要 0.19s——是环境 I/O 吞吐问题，
+**不是项目类型写坏了，别去改类型**。
+
+- `npx tsc --noEmit`：冷启动约 **8 分钟**；命中 `tsconfig.tsbuildinfo` 增量缓存时可到几秒。
+  所以「本地 3 秒」是缓存假象，CI 是全新 checkout，不能据此推断 CI 耗时。
+- `next build`：约 **9 分钟**。
+- 两者都必须**后台跑**，前台必撞工具超时。CI 机器（GitHub Actions）I/O 正常，快得多。
+
 后端冒烟脚本与单测的分工：单测用 fixture 私钥、不打链、不占端口；冒烟跑的是
 **真实进程 + 真实 `.env` + 真实 RPC**，专门验证「起得来、路由对、CORS/限流/413 这些
 横切逻辑在真实 HTTP 栈上生效」。单测覆盖不到的正是这一层。
