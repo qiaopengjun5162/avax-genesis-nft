@@ -14,7 +14,12 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
+# 必须 export：服务进程要监听的正是这个端口。之前只拿它拼 BASE 却不 export，
+# 于是服务实际听的是 .env 里的 PORT（或默认 8787），BASE 却是 8791——两者
+# 对不上时要么全部超时，要么（更糟）撞上 8791 上的旧实例，断言全绿但测的
+# 是别人的进程。export 之后 process.env 优先级高于 .env，端口必然一致。
 PORT="${SMOKE_PORT:-8791}"
+export PORT
 BASE="http://127.0.0.1:${PORT}"
 LOG="$(mktemp -t genesis-smoke)"
 # 环境里有 HTTP 代理会把 127.0.0.1 的请求也送走（表现为 502），必须绕开
@@ -39,12 +44,36 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# 起服务前先确认端口是空的。不检查的话，端口上若跑着**别的实例**（比如开发
+# 时手动起的旧进程），本脚本起的新进程会 listen 失败退出，而 13 项断言全部
+# 打在那个旧实例上——全绿，实际一行新代码都没验到。假绿灯比失败危险得多。
+# 注意别写 `|| echo 000`：curl 连不上时 -w 本身就会输出 000，再 echo 一次
+# 变成 000000，于是「端口是空的」被误判成「已被占用」（表现为 HTTP 000000）。
+# 正确做法是让 curl 的空输出/失败都收敛成单个 000。
+pre="$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 2 "${BASE}/healthz" 2>/dev/null)"
+[ -z "$pre" ] && pre=000
+if [ "$pre" != "000" ]; then
+  echo "❌ 端口 ${PORT} 上已经有服务在响应（HTTP ${pre}）——冒烟必须测自己起的进程。" >&2
+  echo "   停掉它，或换个端口重跑：SMOKE_PORT=8792 bash backend/script/smoke.sh" >&2
+  exit 2
+fi
+
 info "启动签名服务（端口 ${PORT}）"
 node --experimental-strip-types src/server.ts >"$LOG" 2>&1 &
 SRV_PID=$!
 
 for _ in $(seq 1 40); do
-  code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "${BASE}/healthz" 2>/dev/null || echo 000)"
+  # 进程已经死了就别再空等满 20 秒：端口冲突（EADDRINUSE）/ 配置错误都是
+  # 启动瞬间就退出，日志里已经有明确原因，直接打出来最快
+  if ! kill -0 "$SRV_PID" 2>/dev/null; then
+    echo "❌ 服务进程启动后立刻退出（多半是端口被占或配置错误）。日志：" >&2
+    sed -n '1,30p' "$LOG" >&2
+    exit 2
+  fi
+  # 同上：不要 `|| echo 000`，否则连不上时拿到 000000（数字比较不会出错，
+  # 但打进日志/报错里会让人以为端口真有东西在响应）
+  code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "${BASE}/healthz" 2>/dev/null)"
+  [ -z "$code" ] && code=000
   [ "$code" = "200" ] && break
   sleep 0.5
 done
@@ -53,7 +82,16 @@ if [ "$code" != "200" ]; then
   sed -n '1,30p' "$LOG" >&2
   exit 2
 fi
-ok "服务就绪"
+# 双保险：确认响应 200 的确实是**本脚本刚起的**那个进程。预检之后仍有竞态
+# （比如两个冒烟同时跑）：此时新进程 EADDRINUSE 退出、日志里不会有监听行，
+# 而端口上还有别人在应答——只靠 curl 200 抓不到，得看日志。
+if grep -q "127.0.0.1:${PORT}" "$LOG"; then
+  ok "服务就绪（且确认是本进程在听 ${PORT}）"
+else
+  echo "❌ 端口 ${PORT} 有响应，但本进程日志里没有监听记录——测到的可能是别人的进程。日志：" >&2
+  sed -n '1,30p' "$LOG" >&2
+  exit 2
+fi
 
 info "只读端点"
 code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "${BASE}/")"
@@ -115,9 +153,30 @@ echo "$hdr" | grep -qi '^vary:.*origin' && ok "响应带 Vary: Origin" || bad "�
 if [ "${SMOKE_SIGN:-0}" = "1" ] && [ -n "$WL" ]; then
   info "真签名（要 RPC，会占一个名额）"
   body="$("${CURL[@]}" -X POST -H 'content-type: application/json' -d "{\"wallet\":\"${WL}\"}" "${BASE}/sign")"
+  # 用 node 解析 JSON，别用 sed 抓正则：
+  # - 原先 `grep -o 'GENESIS #[0-9]*'` 匹配不到（imageURI 是 data URI，不是明文
+  #   标题），每次都输出「图=」，成功信息等于没告诉你发了什么；
+  # - 换 sed 抓 `"imageURI":"([^"]*)"` 也不行：data URI 里的引号被 JSON 转义成
+  #   \"，sed 抓到一半就断（表现为「imageURI=<解析不出>」）。JSON 转义是正则的盲区。
+  # 一次调用同时取「图前缀」和「deadline 是否未来」，第 1 行=imageURI，第 2 行=1/0。
+  SIGN_INFO="$(
+    printf '%s' "$body" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);console.log((j.imageURI||"").slice(0,44));console.log(Number(j.deadline)>Math.floor(Date.now()/1000)?"1":"0")}catch{console.log("");console.log("0")}})'
+  )"
+  FIG="$(printf '%s\n' "$SIGN_INFO" | sed -n '1p')"
+  FUTURE="$(printf '%s\n' "$SIGN_INFO" | sed -n '2p')"
+
   echo "$body" | grep -q '"signature"' \
-    && ok "POST /sign 拿到签名（图=$(echo "$body" | grep -o 'GENESIS #[0-9]*' | head -1)）" \
+    && ok "POST /sign 拿到签名（imageURI=${FIG:-<空>}…）" \
     || bad "POST /sign 拿到签名" "含 signature" "$(echo "$body" | tr -d '\n' | head -c 160)"
+
+  # 只验「有没有 signature」不够：deadline 若已是过去时间，这就是一张废签名，
+  # 而失败会一路拖到用户点 Mint 上链时才炸（链上 revert，用户只看到交易失败）。
+  # 在这里挡下，能立刻发现 SIGN_DEADLINE_SECONDS 配错之类的启动期问题。
+  if [ "$FUTURE" = "1" ]; then
+    ok "签名 deadline 是未来时间（不是废签名）"
+  else
+    bad "签名 deadline 是未来时间" "未来" "已过期或缺失"
+  fi
 fi
 
 printf '\n────────────────────────\n通过 %d，失败 %d\n' "$pass" "$fail"
