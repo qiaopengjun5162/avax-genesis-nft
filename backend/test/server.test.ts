@@ -128,6 +128,24 @@ test("server: POST /sign 坏 JSON 返回 400（非 500）", async () => {
   assert.match(json.error, /JSON/);
 });
 
+test("server: POST /sign body 是 JSON null 返回 400（解构 null 不该 500）", async () => {
+  // JSON.parse("null") → null，`const {wallet} = null` 会抛 TypeError。
+  // 修复前落进 catch 的 500 分支，把客户端错误报成服务端错误。
+  const { code, json } = await call("POST", "/sign", "null");
+  assert.equal(code, 400);
+  assert.match(json.error, /wallet/);
+});
+
+test("server: 畸形 Host 头返回 400，而不是 reject/挂死", async () => {
+  // Host 含空格 → new URL 抛 TypeError。它原本在 try 之外，会让 handler
+  // reject（未处理的 promise rejection）+ 请求悬挂。修复后归 400。
+  const req = mockReq("GET", "/");
+  req.headers.host = "a b";
+  const res = mockRes();
+  await handler(req, res);
+  assert.equal(res.statusCode, 400);
+});
+
 test("server: POST /sign 缺 wallet 返回 400", async () => {
   const { code, json } = await call("POST", "/sign", JSON.stringify({}));
   assert.equal(code, 400);

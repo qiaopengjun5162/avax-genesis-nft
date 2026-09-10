@@ -380,7 +380,6 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
   const _inflight = deps.inflight ?? inflight;
   const _locks = deps.locks ?? locks;
   const _totalSupply = deps.totalSupplyOnChain ?? totalSupplyOnChain;
-  const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   reqStart.set(req, Date.now());
 
   if (req.method === "OPTIONS") {
@@ -388,6 +387,16 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
     res.end();
     accessLog(req, 204);
     return;
+  }
+
+  // 畸形 / 伪造的 Host（如 "a b"）会让 new URL 抛 TypeError。它原本在 try
+  // 之外，一抛错 handler 就 reject → 未处理的 promise rejection + 请求挂死
+  // 到客户端超时。Host 是客户端可控输入，属客户端错误（400），不该拖垮请求。
+  let url: URL;
+  try {
+    url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+  } catch {
+    return send(req, res, 400, { error: "invalid request URL" });
   }
 
   try {
@@ -469,7 +478,9 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
         return send(req, res, 503, { error: "signer 未配置（缺 SIGNER_PRIVATE_KEY）" });
       }
       const body = await readBody(req);
-      const { wallet, imageURI } = JSON.parse(body || "{}");
+      // JSON.parse("null") → null，解构 null 会抛 TypeError 落进 catch 的 500
+      // 分支——客户端发来合法 JSON 但非对象，属客户端错误（400）而非服务端错误。
+      const { wallet, imageURI } = JSON.parse(body || "{}") ?? {};
       if (!wallet) return send(req, res, 400, { error: "missing wallet" });
 
       let addr: string;
