@@ -267,6 +267,43 @@ function getAllowlist(wallet: string, ip: string) {
   return { method: "GET", url: `/allowlist/${wallet}`, headers: { host: "x" }, socket: { remoteAddress: ip } } as any;
 }
 
+// 以下用例各用独立 IP：限流按 IP 分桶，共用会互相顶掉（表现为莫名的 429）
+test("server: /sign 未配置 signer 返回 503（缺 SIGNER_PRIVATE_KEY 时拒签）", async () => {
+  // deps.signer 显式传 null = 未配置。此时绝不能放通，否则等于无签名放行。
+  const res = mockRes();
+  await handler(postSign({ wallet: ANVIL_ADDR_0 }, "20.20.20.1"), res, {
+    signer: null,
+    allowlist: { [ANVIL_ADDR_0]: { limit: 3 } } as Allowlist,
+  });
+  assert.equal(res.statusCode, 503);
+});
+
+test("server: /sign 钱包地址非法返回 400（不落到 500）", async () => {
+  const res = mockRes();
+  await handler(postSign({ wallet: "not-an-address" }, "20.20.20.2"), res, {
+    signer: new ethers.Wallet(ANVIL_KEY_0),
+    allowlist: { [ANVIL_ADDR_0]: { limit: 3 } } as Allowlist,
+  });
+  assert.equal(res.statusCode, 400);
+  assert.match(res._body, /wallet/);
+});
+
+test("server: /sign imageURI 非法返回 400（只收 http(s)/ipfs/data:image）", async () => {
+  // 用户自选图会写进 tokenURI 上链，放开任意协议等于把钓鱼内容塞进 NFT
+  const res = mockRes();
+  await handler(
+    postSign({ wallet: ANVIL_ADDR_0, imageURI: "javascript:alert(1)" }, "20.20.20.3"),
+    res,
+    {
+      signer: new ethers.Wallet(ANVIL_KEY_0),
+      allowlist: { [ANVIL_ADDR_0]: { limit: 3 } } as Allowlist,
+      numberMintedOnChain: async () => 0,
+    },
+  );
+  assert.equal(res.statusCode, 400);
+  assert.match(res._body, /imageURI/);
+});
+
 test("server: /sign 链上配额核验失败（RPC 不可达）返回 503（fail-closed）", async () => {
   // 合约 v3 没有 per-wallet 硬上限，配额全靠后端签名把关。
   // 若 minted 读不到（null）还按 0 走就会无限越界。所以 fail-closed：503 + 拒签。
