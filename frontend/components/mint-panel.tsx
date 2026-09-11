@@ -4,42 +4,12 @@ import { useCallback, useEffect, useEffectEvent, useState } from "react";
 import { useAccount, useWriteContract, useWaitForTransactionReceipt } from "wagmi";
 import { CONTRACT_ADDRESS, SIGNER_URL, STATUS_TEXT, explorerTx, FAUCET_URL } from "@/lib/config";
 import { genesisMintAbi } from "@/lib/abi";
+import { humanizeError, isUserRejection } from "@/lib/errors";
 
 const btnPrimary =
   "rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50";
 const inputCls =
   "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none";
-
-/** 合约 custom error selector → 人话（cast sig 对过） */
-const REVERT_HINTS: Array<{ sel: string; hint: string }> = [
-  { sel: "0x8baa579f", hint: "签名无效：钱包不在白名单 / 签名被篡改，请重试" },
-  { sel: "0x7248afc4", hint: "签名已过期：领取窗口约 1 小时，请重新点 Mint 要一个新签名" }, // SignatureExpired
-  { sel: "0x900bb2c9", hint: "这个签名已经上链过了（同一签名只能用一次），请重新点 Mint 要一个新签名" },
-  { sel: "0x06290e4e", hint: "mint 还没开始（合约 Waiting 状态）" },
-  { sel: "0x8a164f63", hint: "供给已满（1000/1000）" },
-  { sel: "0x552ea2c6", hint: "付款不足：合约 price() 要求付 AVAX，请给钱包充值测试币后重试" }, // EtherAmountMismatch
-  // 后续合约定性调整带来的新错误（v3+）——cast sig -- 验证过
-  { sel: "0xd7d248ba", hint: "mint 已被 owner 暂停（合约 Paused 状态），等恢复" }, // MintPaused
-  { sel: "0x9be4ff54", hint: "图 URL 是空的——请选一张图或留空让后端分配" }, // EmptyImageURI
-  { sel: "0xd92e233d", hint: "owner 配置错：setSigner 不能传 0 地址（合约层问题，联系 owner）" }, // ZeroAddress
-  { sel: "0xc2caa2a6", hint: "合约余额为 0 或 owner 提现失败（合约层问题，联系 owner）" }, // NoBalance
-];
-
-function humanizeError(e: unknown): string {
-  const text = e instanceof Error ? `${e.message} ${(e as { cause?: unknown }).cause ?? ""}` : String(e);
-  for (const { sel, hint } of REVERT_HINTS) {
-    if (text.includes(sel)) return hint;
-  }
-  const first = (e instanceof Error ? e.message : String(e)).split("\n")[0] ?? "未知错误";
-  return first.length > 160 ? `${first.slice(0, 160)}…` : first;
-}
-
-/** 钱包里点了「拒绝」（code 4001 / UserRejectedRequestError）—— 不算链上失败 */
-function isUserRejection(e: unknown): boolean {
-  if (!(e instanceof Error)) return false;
-  const blob = `${e.name} ${e.message} ${(e as { shortMessage?: string }).shortMessage ?? ""}`;
-  return /user rejected|userrejectedrequesterror|4001/i.test(blob);
-}
 
 type Quota = {
   allowlisted: boolean;
