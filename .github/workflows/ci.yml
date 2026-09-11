@@ -54,7 +54,7 @@ jobs:
         run: npm test
 
   frontend:
-    name: Frontend (tsc + eslint)
+    name: Frontend (test + tsc + eslint)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -66,6 +66,14 @@ jobs:
       - name: Install
         working-directory: frontend
         run: npm ci
+      - name: Test
+        working-directory: frontend
+        # 用 node:test + --experimental-strip-types，不引入 vitest 等新依赖
+        # （本机 I/O 慢，装测试框架代价太大）。
+        # 主要盯的是 lib/errors.ts 里合约 error selector 有没有写错：
+        # 写错是静默故障（匹配不上就走 fallback，用户看到原始报错，没人报 bug）。
+        # 测试用 viem 从 ABI 现算 selector，不写死值，合约改了会自动红。
+        run: npm test
       - name: Type-check
         working-directory: frontend
         # 仅类型检查：next build 要启 webpack + 资源构建，拉慢 CI；

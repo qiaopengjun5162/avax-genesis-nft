@@ -81,7 +81,7 @@ contracts/
 .github/workflows/ci.yml
   contracts: forge build + lint + test --force
   backend:   npm ci + npm test
-  frontend:  npm ci + tsc --noEmit
+  frontend:  npm ci + npm test + tsc --noEmit + lint
 ```
 
 ---
@@ -205,8 +205,15 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 | 合约覆盖率 | lcov | src/GenesisMint.sol 100% (L/S/B/F) | `forge coverage --report summary` |
 | 后端 | node:test | **85** 全过 | `cd backend && npm test` |
 | 后端冒烟 | curl（真实进程） | 13 项（默认）/ 15 项（`SMOKE_SIGN=1`） | `bash backend/script/smoke.sh`；换端口 `SMOKE_PORT=8792 bash backend/script/smoke.sh` |
+| 前端 | node:test | **9** 全过 | `cd frontend && npm test` |
 | 前端 | tsc | 类型检查 | `cd frontend && npx tsc --noEmit` |
 | 前端 | eslint | 0 error | `cd frontend && npm run lint` |
+
+前端测试只用 `node:test`（Node 内置）+ `--experimental-strip-types`，**不引入 vitest 等
+新依赖**——本机 I/O 慢，装一整套测试框架代价太大。它主要盯 `lib/errors.ts`：那里存着
+合约 custom error selector → 人话提示的映射，**写错是静默故障**（匹配不上就走 fallback，
+用户只看到原始报错，没人会来提 bug）。测试用 viem 从 `lib/genesisMintAbi.json` 现算
+selector，不写死任何值——合约改了 error 签名，测试自己会红。
 
 CI：`.github/workflows/ci.yml`，push / PR 到 `main` 触发三 job 并行。
 
@@ -278,8 +285,9 @@ CI 里 `contracts` job 跑 `forge build`，本地手动同步走脚本。
 - 每个小改动一个独立 commit（commit-by-commit，便于 review 与回滚）
 - 合约改动 → 立即跑 `forge test --force` + `forge lint`
 - 后端改动 → 立即跑 `npm test`（CI mirror）
-- 前端改动 → `npx tsc --noEmit` + `npm run lint`，必要时本地 `npm run dev` 兜底
-- ABI 改动后跑 `bash script/gen-abi.sh`，提交 diff
+- 前端改动 → `npm test` + `npx tsc --noEmit` + `npm run lint`，必要时本地 `npm run dev` 兜底
+- ABI 改动后跑 `bash script/gen-abi.sh`，提交 diff（前端测试会拿新 ABI 校对 selector，
+  合约 error 改了而 `lib/errors.ts` 没跟上时会直接红，不用人记得同步）
 
 ---
 
