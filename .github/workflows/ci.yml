@@ -8,7 +8,8 @@ on:
   workflow_dispatch:
 
 # 三个并行 job：合约 / 后端 / 前端
-# 合约与后端各自独立验证；前端跑 type-check + eslint（不构建 Next）
+# 合约与后端各自独立验证；前端做 test + type-check + eslint + **生产构建**
+# （tsc 只能验类型，验不到 client/server 边界、预渲染与字体加载）
 
 jobs:
   contracts:
@@ -78,7 +79,7 @@ jobs:
         run: bash script/smoke.sh
 
   frontend:
-    name: Frontend (test + tsc + eslint)
+    name: Frontend (test + tsc + eslint + build)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -100,8 +101,9 @@ jobs:
         run: npm test
       - name: Type-check
         working-directory: frontend
-        # 仅类型检查：next build 要启 webpack + 资源构建，拉慢 CI；
-        # 真正的渲染 bug 留到 PR 前的本地 next build 兜底。
+        # 仅类型检查（快反馈）：next build 那步也会跑一遍 TypeScript，
+        # 但单独留着能让「类型错」和「构建错」在 CI 里分得清，
+        # 也省得每次改一行类型都要等完整构建。
         #
         # 耗时说明：这一步慢在**读文件**，不是类型复杂。--extendedDiagnostics
         # 显示 Check time 仅 0.58s，而 I/O Read 达 318s（3051 个文件 / 38 万行
@@ -115,3 +117,13 @@ jobs:
         # eslint-config-next（flat config）此前一直有 2 个
         # react-hooks/set-state-in-effect 报错没人发现，正是因为它没进 CI。
         run: npm run lint
+      - name: Build
+        working-directory: frontend
+        # tsc + eslint 都看不见这个项目的真实构建边界：client/server 组件
+        # 划分、`next/font` 取字体、预渲染（4 个静态页）以及 RSC 里的非法
+        # import，只有 next build 会在这里报。原来注释写的是「留到 PR 前的
+        # 本地 next build 兜底」——那等于把一道自动检查交给人的记性。
+        #
+        # 空 NEXT_PUBLIC_* 是刻意的：CI 没有 .env，正好覆盖「部署时忘配」
+        # 这条真实路径（代码里有归一化回退，构建必须在这种环境下也能过）。
+        run: npx next build
