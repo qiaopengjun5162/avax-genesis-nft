@@ -44,11 +44,12 @@ signature = backend.sign(final)
 
 | 防线 | 挡什么 | 实现 |
 |---|---|---|
-| 限流 | 匿名脚本刷爆 RPC / CPU | `/sign` 30 次·IP⁻¹·min⁻¹、`/allowlist` 60 次；键默认取真实 TCP 对端（`X-Forwarded-For` 可伪造，需 `TRUST_PROXY=1` 才认） |
+| 限流 | 匿名脚本刷爆 RPC / CPU | `/sign` 30 次·IP⁻¹·min⁻¹、`/allowlist` 120 次（前端 4s 轮询 = 15 次/分钟/标签页，60 会只够 4 个标签页 → 自己把自己 429 掉）；键默认取真实 TCP 对端（`X-Forwarded-For` 可伪造，需 `TRUST_PROXY=1` 才认） |
 | fail-closed | RPC 抖动时按 `minted=0` 无限签发 | 读不到链上配额 → 503 拒签，不猜 |
 | in-flight 占位 | 连点 / 并发两个请求读到同一个 `minted`，`limit=1` 签出 2 张 | 签发前同步占位（有效期 = 签名 deadline）+ 同钱包排队；`minted + pending > limit` 即拒 |
 | 配置合法化 | `allowlist.json` 里 `limit` 手滑写成 `"三张"` → `NaN` → `minted + pending > NaN` 恒 false → **无限签发** | 非有限数回落 1 + 告警（`Math.max(1, NaN)` 仍是 `NaN`，不能直接夹） |
 | 链上读取超时 | RPC 挂住时请求永不返回，`/allowlist` 每 4s 轮询一次会越堆越多 | 两个端点共用 `RPC_QUERY_TIMEOUT_MS`（默认 8s）；超时 → `null` → 503 / 「配额未知」 |
+| 故障归类 | 把 429 说成「签名服务挂了」→ 用户查错方向，且 Mint 被无辜禁用 | 响应拆成 200 / 429 / 故障三分支：429 保留旧配额 + 按 `retry-after` 退避（退避期不发请求），不锁按钮；5xx/网络不可达才 fail-closed |
 
 ---
 
@@ -61,6 +62,7 @@ frontend/             Next.js 16 + wagmi + RainbowKit + viem
   lib/abi.ts          viem 的 ABI 类型（顶层 import JSON，故不含纯逻辑）
   lib/token-uri.ts    tokenURI 的 base64 解码（可被 node:test 直接跑）
   lib/media.ts        图片 URL 归一化（ipfs:// → 网关；否则浏览器显示破图）
+  lib/quota.ts        /allowlist 响应解析（200/429/故障三分支，纯函数）
   lib/config.ts       Fuji 链定义 / CONTRACT_ADDRESS / SIGNER_URL
   lib/genesisMintAbi.json  ← 脚本生成（勿手改）
 
@@ -214,17 +216,24 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 | 合约覆盖率 | lcov | src/GenesisMint.sol 100% (L/S/B/F) | `forge coverage --report summary` |
 | 后端 | node:test | **91** 全过 | `cd backend && npm test` |
 | 后端冒烟 | curl（真实进程） | 14 项（默认）/ 16 项（`SMOKE_SIGN=1`） | `bash backend/script/smoke.sh`；换端口 `SMOKE_PORT=8792 bash backend/script/smoke.sh` |
-| 前端 | node:test | **31** 全过 | `cd frontend && npm test` |
+| 前端 | node:test | **44** 全过 | `cd frontend && npm test` |
 | 前端 | tsc | 类型检查 | `cd frontend && npx tsc --noEmit` |
 | 前端 | eslint | 0 error | `cd frontend && npm run lint` |
 
 前端测试只用 `node:test`（Node 内置）+ `--experimental-strip-types`，**不引入 vitest 等
 新依赖**——本机 I/O 慢，装一整套测试框架代价太大。它盯两类「写错了但不报错」的问题：
 
-- `lib/errors.ts`：合约 custom error selector → 人话提示的映射，**写错是静默故障**
-  （匹配不上就走 fallback，用户只看到原始报错，没人会来提 bug）。测试用 viem 从
-  `lib/genesisMintAbi.json` 现算 selector，不写死任何值——合约改了 error 签名，测试
-  自己会红。
+- `lib/errors.ts`：合约 custom error → 人话提示的映射，**写错是静默故障**
+  （匹配不上就走 fallback，用户只看到原始报错，没人会来提 bug）。每个条目同时记
+  selector 与函数名：viem 在 ABI 里有这个 error 时**一定会解码**，message 里只有
+  `Error: SignatureExpired()`，hex 只在内层 `raw`——只按 selector 匹配等于全部失效
+  （实测 12 条一条都不命中）。测试用 viem 从 `lib/genesisMintAbi.json` 现算 selector
+  并反查名字，且用**真实 viem 错误对象**（`ContractFunctionRevertedError` →
+  `ContractFunctionExecutionError`）构造用例，不写死任何值。
+- `lib/quota.ts`：`/allowlist` 响应解析。这个端点被每 4s 轮询一次，它的失败方式直接
+  决定 Mint 能不能点，所以 200 / 429 / 真故障必须分开：429 是「后端活着、我太快」
+  （保留旧配额 + 按 `retry-after` 退避，**不**禁用 Mint），5xx / 网络不可达才是
+  fail-closed；200 但结构不符也算故障（别把 `undefined` 喂进渲染）。
 - `lib/env.ts`：`NEXT_PUBLIC_SIGNER_URL` / `NEXT_PUBLIC_CONTRACT_ADDRESS` 的归一化。
   空串会拼出相对路径（打到 Next 自己的路由）、尾斜杠会拼出 `//sign`（部分网关 404），
   这两种都只在部署时暴露，本地 `.env` 写对了永远复现不了。
