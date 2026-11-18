@@ -4,6 +4,7 @@ import { useCallback, useEffect, useEffectEvent, useState } from "react";
 import { useAccount, useWriteContract, useWaitForTransactionReceipt } from "wagmi";
 import { CONTRACT_ADDRESS, SIGNER_URL, STATUS_TEXT, explorerTx, FAUCET_URL } from "@/lib/config";
 import { genesisMintAbi } from "@/lib/abi";
+import { resolveImageUrl } from "@/lib/media";
 import { describeHttpFailure, humanizeError, isUserRejection } from "@/lib/errors";
 
 const btnPrimary =
@@ -347,7 +348,7 @@ export default function MintPanel({
       {artPreview && (
         <div className="flex items-center gap-4 rounded-xl border border-gray-200 p-4">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={artPreview} alt="预览" className="h-24 w-24 rounded-lg border border-gray-200" />
+          <img src={resolveImageUrl(artPreview)} alt="预览" className="h-24 w-24 rounded-lg border border-gray-200" />
           <div className="min-w-0 text-sm text-gray-600">
             <p className="font-medium text-gray-900">签名成功，这张图将铸成 NFT</p>
             <p className="mt-1 break-all font-mono text-xs">{artPreview.slice(0, 90)}…</p>

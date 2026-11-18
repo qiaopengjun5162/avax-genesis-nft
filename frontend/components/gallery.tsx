@@ -5,6 +5,7 @@ import { useAccount, usePublicClient, useReadContract } from "wagmi";
 import { CONTRACT_ADDRESS } from "@/lib/config";
 import { genesisMintAbi, shortAddr } from "@/lib/abi";
 import { decodeTokenUri } from "@/lib/token-uri";
+import { resolveImageUrl } from "@/lib/media";
 
 type Nft = {
   tokenId: number;
@@ -116,7 +117,7 @@ export default function Gallery() {
               {n.meta?.image ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
-                  src={n.meta.image}
+                  src={resolveImageUrl(n.meta.image)}
                   alt={n.meta.name ?? `#${n.tokenId}`}
                   className="aspect-square w-full bg-gray-200 object-cover"
                 />
