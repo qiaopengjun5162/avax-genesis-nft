@@ -47,6 +47,8 @@ signature = backend.sign(final)
 | 限流 | 匿名脚本刷爆 RPC / CPU | `/sign` 30 次·IP⁻¹·min⁻¹、`/allowlist` 60 次；键默认取真实 TCP 对端（`X-Forwarded-For` 可伪造，需 `TRUST_PROXY=1` 才认） |
 | fail-closed | RPC 抖动时按 `minted=0` 无限签发 | 读不到链上配额 → 503 拒签，不猜 |
 | in-flight 占位 | 连点 / 并发两个请求读到同一个 `minted`，`limit=1` 签出 2 张 | 签发前同步占位（有效期 = 签名 deadline）+ 同钱包排队；`minted + pending > limit` 即拒 |
+| 配置合法化 | `allowlist.json` 里 `limit` 手滑写成 `"三张"` → `NaN` → `minted + pending > NaN` 恒 false → **无限签发** | 非有限数回落 1 + 告警（`Math.max(1, NaN)` 仍是 `NaN`，不能直接夹） |
+| 链上读取超时 | RPC 挂住时请求永不返回，`/allowlist` 每 4s 轮询一次会越堆越多 | 两个端点共用 `RPC_QUERY_TIMEOUT_MS`（默认 8s）；超时 → `null` → 503 / 「配额未知」 |
 
 ---
 
@@ -56,7 +58,8 @@ signature = backend.sign(final)
 frontend/             Next.js 16 + wagmi + RainbowKit + viem
   app/page.tsx        首页（统计 / mint / 画廊）
   components/         mint-panel / gallery / connect-button
-  lib/abi.ts          viem 的 ABI 类型 + decodeTokenUri
+  lib/abi.ts          viem 的 ABI 类型（顶层 import JSON，故不含纯逻辑）
+  lib/token-uri.ts    tokenURI 的 base64 解码（可被 node:test 直接跑）
   lib/config.ts       Fuji 链定义 / CONTRACT_ADDRESS / SIGNER_URL
   lib/genesisMintAbi.json  ← 脚本生成（勿手改）
 
@@ -203,9 +206,9 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 | 合约 | forge | **35** 全过 | `forge test --force` |
 | 合约 lint | forge lint | 0 警告 | `forge lint` |
 | 合约覆盖率 | lcov | src/GenesisMint.sol 100% (L/S/B/F) | `forge coverage --report summary` |
-| 后端 | node:test | **85** 全过 | `cd backend && npm test` |
+| 后端 | node:test | **89** 全过 | `cd backend && npm test` |
 | 后端冒烟 | curl（真实进程） | 13 项（默认）/ 15 项（`SMOKE_SIGN=1`） | `bash backend/script/smoke.sh`；换端口 `SMOKE_PORT=8792 bash backend/script/smoke.sh` |
-| 前端 | node:test | **17** 全过 | `cd frontend && npm test` |
+| 前端 | node:test | **24** 全过 | `cd frontend && npm test` |
 | 前端 | tsc | 类型检查 | `cd frontend && npx tsc --noEmit` |
 | 前端 | eslint | 0 error | `cd frontend && npm run lint` |
 
@@ -219,6 +222,9 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 - `lib/env.ts`：`NEXT_PUBLIC_SIGNER_URL` / `NEXT_PUBLIC_CONTRACT_ADDRESS` 的归一化。
   空串会拼出相对路径（打到 Next 自己的路由）、尾斜杠会拼出 `//sign`（部分网关 404），
   这两种都只在部署时暴露，本地 `.env` 写对了永远复现不了。
+- `lib/token-uri.ts`：`tokenURI` 的 base64 解码。它坏掉时什么都不报——画廊只是不出图、
+  名字退回 `#id`。测试覆盖非 data URI、坏 base64、JSON 不是对象（`"123"` 曾被当成
+  元数据返回）、空/空白字段，以及中文名的 UTF-8 解码（`atob` 直接当文本会乱码）。
 
 CI：`.github/workflows/ci.yml`，push / PR 到 `main` 触发三 job 并行。contracts job 里有一步
 **ABI 漂移检查**：重新跑 `script/gen-abi.sh` 再 `git diff --exit-code`，改了合约忘了同步
