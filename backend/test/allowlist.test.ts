@@ -65,6 +65,31 @@ test("allowlist: 缺 limit 字段或非法 → 默认 1", async () =>
     assert.equal(list[B].limit, 1, "缺省填 1");
   }));
 
+test("allowlist: limit 写错成非数字 → 1，绝不放成 NaN（否则等于无限签发）", async () =>
+  withTempAllowlist(
+    // 手写 JSON 时最典型的手滑：加引号写成中文、或写成 "3 张"
+    JSON.stringify({ [A]: { limit: "三张" }, [B]: { limit: "3 张" } }),
+    async (p) => {
+      const list = loadAllowlist(p);
+      // Number("三张") = NaN，而 Math.max(1, NaN) 仍是 NaN。
+      // limit=NaN 时 `/sign` 的 `minted + pending > limit` 恒为 false ——
+      // 配额判断整体失效，任何人都能无限签。必须收敛成有限整数。
+      assert.equal(list[A].limit, 1);
+      assert.equal(list[B].limit, 1);
+      assert.ok(Number.isFinite(list[A].limit), "limit 必须可比较，NaN 会让配额检查 fail-open");
+    },
+  ));
+
+test("allowlist: limit 为 Infinity / 小数 → 有限整数（不产生无上限配额）", async () =>
+  withTempAllowlist(
+    JSON.stringify({ [A]: { limit: "Infinity" }, [B]: { limit: 2.9 } }),
+    async (p) => {
+      const list = loadAllowlist(p);
+      assert.equal(list[A].limit, 1, "Infinity 等同于无上限，必须先回落到安全值");
+      assert.equal(list[B].limit, 2, "小数向下取整，不能出现「可领 2.9 张」");
+    },
+  ));
+
 test("allowlist: isAllowlisted / entryFor 大小写都认", async () =>
   withTempAllowlist(JSON.stringify({ [A]: { limit: 2 } }), async (p) => {
     const list = loadAllowlist(p);

@@ -26,6 +26,26 @@ function parseExpiresAt(raw: unknown): number | null {
   return null;
 }
 
+/**
+ * 解析配额数。
+ *
+ * 为什么不能直接 `Math.max(1, Number(v?.limit ?? 1))`：`Number("三张")` 是
+ * NaN，而 `Math.max(1, NaN)` 还是 **NaN**（Math.max 遇 NaN 一律返回 NaN）。
+ * 于是 `entry.limit` 变成 NaN，`/sign` 里的配额判断 `minted + pending > limit`
+ * 恒为 false —— 明明是「配置写错了一个字」，结果变成**无限签发**。
+ * 这是 fail-open：不报错、不告警，只有翻链上记录才看得出来。
+ *
+ * 所以非有限数一律回落到 1（宁可少给，绝不多给），非整数向下取整。
+ */
+function parseLimit(raw: unknown): number {
+  const n = Number(raw ?? 1);
+  if (!Number.isFinite(n)) {
+    console.warn(`⚠️  白名单 limit=${JSON.stringify(raw)} 不是有限数，按 1 处理（否则配额判断会失效）`);
+    return 1;
+  }
+  return Math.max(1, Math.floor(n));
+}
+
 export function loadAllowlist(
   path = resolve(import.meta.dirname, "../data/allowlist.json"),
 ): Allowlist {
@@ -43,7 +63,7 @@ export function loadAllowlist(
         continue;
       }
       out[addr] = {
-        limit: Math.max(1, Number(v?.limit ?? 1)),
+        limit: parseLimit(v?.limit),
         expiresAt: parseExpiresAt(v?.expiresAt),
       };
     }
