@@ -7,6 +7,7 @@ import {
 } from "@rainbow-me/rainbowkit/wallets";
 import { createConfig } from "wagmi";
 import { defineChain, fallback, http } from "viem";
+import { avalancheFuji } from "viem/chains";
 import { normalizeBaseUrl, pickAddress } from "@/lib/env";
 
 /**
@@ -15,6 +16,12 @@ import { normalizeBaseUrl, pickAddress } from "@/lib/env";
  *  - fallback：再多挂一个 PublicNode，限流时 viem 自动尝试下一个
  * 嫌公共节点不稳的：自己跑节点 / 用 Ankr-paid，把 URL 塞 NEXT_PUBLIC_RPC_URL 即可
  * （fallback 会保留作第二跳，不是彻底替换）
+ *
+ * ⚠️ 必须继承 viem 内置的 `avalancheFuji` 而不是只写 id/name/rpcUrls：
+ * 内置对象带着 `contracts.multicall3`（0xca11…ca11，blockCreated 7096959）。
+ * 手搓一个只有 rpcUrls 的链对象，viem 就不知道 Multicall3 地址，首页那组
+ * `useReadContracts` 会在运行时抛 "multicallAddress is required" —— 类型检查
+ * 完全看不出来，整屏数据直接空。RPC 与浏览器仍可按需覆盖。
  */
 const FUJI_RPC_DEFAULT = "https://api.avax-test.network/ext/bc/C/rpc";
 const FUJI_RPC_FALLBACK = "https://avalanche-fuji-rpc.publicnode.com";
@@ -22,9 +29,7 @@ const fujiRpcPrimary = normalizeBaseUrl(process.env.NEXT_PUBLIC_RPC_URL, FUJI_RP
 
 /** Avalanche Fuji C-Chain（chainId 43113）——唯一配置的链，杜绝连到主网 */
 export const fuji = defineChain({
-  id: 43113,
-  name: "Avalanche Fuji",
-  nativeCurrency: { name: "AVAX", symbol: "AVAX", decimals: 18 },
+  ...avalancheFuji,
   rpcUrls: {
     // 主 + fallback 都放进 default：RainbowKit 内部切网/读操作只取
     // rpcUrls.default.http，主节点限流时也能打到 fallback，不只在 transport 层
@@ -43,7 +48,15 @@ export const fuji = defineChain({
  *
  * chains 只有 fuji → 连接即强制切到测试网（链上只有 43113 这一条路）
  */
-const projectId = process.env.NEXT_PUBLIC_WC_PROJECT_ID ?? "genesis-mint-local-demo";
+/**
+ * WalletConnect projectId。
+ *
+ * 注意别写成 `?? 默认值`：`NEXT_PUBLIC_WC_PROJECT_ID=`（CI 里声明成空 /
+ * `.env` 留空行）得到的是**空字符串**，`??` 不会回退，RainbowKit 就拿着
+ * 空 projectId 去初始化 —— 移动端扫码时才报一个跟配置无关的错。
+ */
+const projectId =
+  (process.env.NEXT_PUBLIC_WC_PROJECT_ID ?? "").trim() || "genesis-mint-local-demo";
 
 const connectors = connectorsForWallets(
   [
