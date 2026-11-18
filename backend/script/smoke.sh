@@ -21,7 +21,14 @@ cd "$(dirname "$0")/.."
 PORT="${SMOKE_PORT:-8791}"
 export PORT
 BASE="http://127.0.0.1:${PORT}"
-LOG="$(mktemp -t genesis-smoke)"
+# 注意模板必须带 X：GNU mktemp（CI 的 Ubuntu）对 `-t name` 这种无占位符写法
+# 直接报 "too few X's in template" 并以非零退出，LOG 变成空串 →
+# `>"$LOG"` 重定向失败 → 服务根本没起来，脚本却只会说「进程启动后立刻退出」。
+# 本地 macOS 的 BSD mktemp 会自动补后缀，所以这个问题只在 CI 暴露。
+LOG="$(mktemp "${TMPDIR:-/tmp}/genesis-smoke.XXXXXX")" || {
+  echo "❌ 无法创建日志文件（mktemp 失败）" >&2
+  exit 2
+}
 # 环境里有 HTTP 代理会把 127.0.0.1 的请求也送走（表现为 502），必须绕开
 CURL=(curl -s --noproxy '*')
 
