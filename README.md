@@ -192,6 +192,9 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 - 不填 / 填了认不出的值 → 永不过期：宁可让一条配错的白名单继续有效，
   也不要静默把整批人拒之门外
 - 地址写错只跳过那一条并打 `⚠️` 日志，不会把整份白名单吞成空（曾导致全员 403 且日志无声）
+- 热加载若撞上文件正被编辑（读到半截 JSON / 顶层不是对象），会打 `⚠️` 并**保留上一版名单**，
+  不会把正在服务的钱包全变 403；重载日志末尾会标「读取失败，仍用上一版」。首次启动没配文件
+  则按空名单 fail-closed，同样有告警，不会静默。
 
 优雅关闭：服务收到 `SIGTERM` / `SIGINT` 会先停收新连接、等在途请求结束再退出（10s 超时兜底强退）。
 
@@ -215,7 +218,7 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 | 合约 | forge | **35** 全过 | `forge test --force` |
 | 合约 lint | forge lint | 0 警告 | `forge lint` |
 | 合约覆盖率 | lcov | src/GenesisMint.sol 100% (L/S/B/F) | `forge coverage --report summary` |
-| 后端 | node:test | **92** 全过 | `cd backend && npm test` |
+| 后端 | node:test | **96** 全过 | `cd backend && npm test` |
 | 后端冒烟 | curl（真实进程） | 14 项（默认）/ 16 项（`SMOKE_SIGN=1`） | `bash backend/script/smoke.sh`；换端口 `SMOKE_PORT=8792 bash backend/script/smoke.sh` |
 | 前端 | node:test | **44** 全过 | `cd frontend && npm test` |
 | 前端 | tsc | 类型检查 | `cd frontend && npx tsc --noEmit` |
