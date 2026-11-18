@@ -101,6 +101,11 @@ echo "$body" | grep -q '"service"' && ok "GET / 含 service 字段" || bad "GET 
 
 code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "${BASE}/healthz")"
 expect_code "GET /healthz → 200" 200 "$code"
+# 探针要能反映「本服务私钥 ↔ 链上 signer」的一致性；字段缺失 = 这个能力被删了
+hbody="$("${CURL[@]}" "${BASE}/healthz")"
+echo "$hbody" | grep -q '"signerMatches"' \
+  && ok "GET /healthz 含 signerMatches（签名一致性可观测）" \
+  || bad "GET /healthz 含 signerMatches" "含" "$(echo "$hbody" | tr -d '\n' | head -c 120)"
 
 code="$("${CURL[@]}" -X OPTIONS -o /dev/null -w '%{http_code}' "${BASE}/sign")"
 expect_code "OPTIONS /sign → 204" 204 "$code"

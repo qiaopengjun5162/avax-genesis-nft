@@ -260,8 +260,34 @@ export async function rpcHealth(
   return rpcHealthCache;
 }
 
-/** HTTP 请求处理（抽成可导出函数，便于不绑端口直接单测） */
-export type HandlerDeps = {
+/**
+ * 本服务私钥与链上 signer 的一致性检查结果（启动时 + 每 5 分钟刷新）。
+ *
+ * 为什么要持续检查：owner 调 setSigner 换钥后，本服务签出的名会被合约
+ * 一律拒绝（用户看到 InvalidSignature / 「签名无效」），而 /healthz 之前
+ * 只报 RPC 通不通 —— 探针全绿、所有 mint 失败，是典型的「服务活着但没服务」。
+ */
+type SignerStatus = { onChain: string | null; matches: boolean | null; checkedAt: number };
+let signerStatus: SignerStatus = { onChain: null, matches: null, checkedAt: 0 };
+
+/**
+ * 健康状态判定（纯函数，便于单测，不必真的连链）。
+ *
+ * `signerMatches === null` 表示「还没检查过 / 检查失败」——不能当成不一致，
+ * 否则 RPC 抖一下探针就红；只有确认为 false 才降级。
+ */
+export function healthStatus(opts: {
+  hasSigner: boolean;
+  rpcReachable: boolean;
+  signerMatches: boolean | null;
+}): "ok" | "degraded" {
+  if (!opts.hasSigner) return "degraded";
+  if (!opts.rpcReachable) return "degraded";
+  if (opts.signerMatches === false) return "degraded";
+  return "ok";
+}
+
+/** HTTP 请求处理（抽成可导出函数，便于不绑端口直接单测） */export type HandlerDeps = {
   /** 注入链上配额读取（默认 = 真链读）；null 返回触发 fail-closed */
   numberMintedOnChain?: (wallet: string) => Promise<number | null>;
   /** 注入白名单（默认 = 模块级，支持 SIGHUP 热重载） */
@@ -421,13 +447,21 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
     // GET /healthz 就绪探针（无鉴权）
     if (req.method === "GET" && url.pathname === "/healthz") {
       const h = await rpcHealth();
+      const hasSigner = Boolean(signer);
+      // 只报缓存结果，不再打一次链：探针会被每分钟打几十次，
+      // 签名一致性由启动自检 + 5 分钟定时刷新维护（见 selfCheck）
+      const signerMatches = hasSigner ? signerStatus.matches : null;
       return send(req, res, 200, {
         ok: true,
-        status: !signer ? "degraded" : h.reachable ? "ok" : "degraded",
+        status: healthStatus({ hasSigner, rpcReachable: h.reachable, signerMatches }),
         service: "genesis-mint-signer",
         contract: CONTRACT_ADDRESS,
         chainId: FUJI_CHAIN_ID,
         signer: signer?.address ?? null,
+        // 排障用：链上 signer 是谁、什么时候查的、是否一致
+        signerOnChain: signerStatus.onChain,
+        signerMatches,
+        signerCheckedAt: signerStatus.checkedAt || null,
         rpc: { reachable: h.reachable, blockNumber: h.blockNumber },
         uptimeSec: Math.round(process.uptime()),
       });
@@ -689,18 +723,27 @@ export function installProcessGuard(
   });
 }
 
-/** 启动自检：本服务私钥 ↔ 链上 signer，对不上当场告警（最隐蔽故障） */
-async function selfCheck() {
+/**
+ * 启动自检：本服务私钥 ↔ 链上 signer，对不上当场告警（最隐蔽故障）。
+ *
+ * 结果写进 signerStatus 供 /healthz 读取；定时刷新时传 quiet 避免每 5 分钟
+ * 刷一行「一致 ✅」（运营日志应该是「有事才说话」）。
+ */
+async function selfCheck(quiet = false) {
   const onChain = await signerOnChain();
-  if (!onChain) {
-    console.warn("⚠️  读不到链上 signer（RPC 不通 / CONTRACT_ADDRESS 不对）");
+  if (!onChain || !signer) {
+    signerStatus = { onChain, matches: null, checkedAt: Date.now() };
+    if (!quiet) console.warn("⚠️  读不到链上 signer（RPC 不通 / CONTRACT_ADDRESS 不对）");
     return;
   }
-  if (onChain.toLowerCase() === signer!.address.toLowerCase()) {
-    console.log(`   signer 自检: 与链上一致 ✅`);
+  const matches = onChain.toLowerCase() === signer.address.toLowerCase();
+  signerStatus = { onChain, matches, checkedAt: Date.now() };
+  if (matches) {
+    if (!quiet) console.log(`   signer 自检: 与链上一致 ✅`);
     return;
   }
-  console.warn("⚠️  signer 不一致：链上=" + onChain + "，本服务=" + signer!.address);
+  // 不一致必须每次都说：这时所有 mint 都会被合约拒绝
+  console.warn("⚠️  signer 不一致：链上=" + onChain + "，本服务=" + signer.address);
   console.warn("   这样签出的名会被合约拒绝。用 owner 调 setSigner(本服务地址)，或换 SIGNER_PRIVATE_KEY。");
 }
 
@@ -724,6 +767,10 @@ if (isMain && signer) {
     console.warn("⚠️  白名单为空：backend/data/allowlist.json 缺失或内容为空，所有 /sign 都会返回 403");
   }
   void selfCheck();
+  // 每 5 分钟复核：owner 调 setSigner 轮换密钥后，/healthz 要能反映出来，
+  // 否则服务「活着但每个 mint 都被拒」会一路绿到用户投诉
+  const signerTimer = setInterval(() => void selfCheck(true), 5 * 60_000);
+  signerTimer.unref?.();
 
   const server = createServer((req, res) => {
     void handler(req, res);

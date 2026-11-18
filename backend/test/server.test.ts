@@ -16,6 +16,7 @@ import {
   numEnv,
   rpcHealth,
   installProcessGuard,
+  healthStatus,
   type ClosableServer,
 } from "../src/server.ts";
 import { type Allowlist } from "../src/allowlist.ts";
@@ -83,6 +84,20 @@ test("server: GET /healthz 返回 ok 且结构正确", async () => {
   assert.match(json.contract, /^0x[0-9a-fA-F]{40}$/);
   assert.ok(typeof json.uptimeSec === "number");
   assert.ok(typeof json.rpc.reachable === "boolean");
+  // 签名一致性要能被探针看到：没跑过自检时是 null，绝不能伪造成 true
+  assert.ok("signerOnChain" in json);
+  assert.ok("signerMatches" in json);
+  assert.ok("signerCheckedAt" in json);
+});
+
+test("healthStatus: 只有确认「签名不一致」才降级（未检查 ≠ 不一致）", () => {
+  // owner 轮换密钥后，本服务签的名全会被合约拒 —— 探针必须红
+  assert.equal(healthStatus({ hasSigner: true, rpcReachable: true, signerMatches: false }), "degraded");
+  assert.equal(healthStatus({ hasSigner: true, rpcReachable: true, signerMatches: true }), "ok");
+  // RPC 抖一下导致「查不到」时不能判坏，否则探针会跟着链一起抖
+  assert.equal(healthStatus({ hasSigner: true, rpcReachable: true, signerMatches: null }), "ok");
+  assert.equal(healthStatus({ hasSigner: false, rpcReachable: true, signerMatches: null }), "degraded");
+  assert.equal(healthStatus({ hasSigner: true, rpcReachable: false, signerMatches: true }), "degraded");
 });
 
 test("server: 未知路径返回 404", async () => {
@@ -766,6 +781,21 @@ test("artIndex: 水位线原子落盘——临时文件被重命名，不留 .tm
     /* 没有 .tmp 是正确结果 */
   }
   assert.equal(tmpLeft, false, "原子替换后不应残留临时文件");
+});
+
+test("persistArtIndex: 落盘失败只告警，不抛（图序号重复不该拖垮服务）", () => {
+  // 目录不存在 / 只读挂载：写水位线必然失败。此时服务仍要能签发，
+  // 代价仅仅是「重启后可能重复发图」——比整个签名服务挂掉好得多。
+  const warned: string[] = [];
+  const orig = console.warn;
+  console.warn = (m: string) => void warned.push(String(m));
+  try {
+    assert.doesNotThrow(() => persistArtIndex(7, "/definitely/not/a/dir/" + Date.now() + "/.art-index"));
+  } finally {
+    console.warn = orig;
+  }
+  assert.equal(warned.length, 1);
+  assert.match(warned[0], /落盘失败/);
 });
 
 // ---- 错误码口径 ----
