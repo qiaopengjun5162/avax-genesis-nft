@@ -64,6 +64,18 @@ jobs:
           SIGNER_PRIVATE_KEY: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
           PORT: "8787"
         run: npm test
+      - name: 冒烟（真实进程 + 真实 HTTP 栈）
+        working-directory: backend
+        # 单测用的是 mock req/res，验不到 listen / 端口冲突 / 413 之后排空 body /
+        # keep-alive 这些只在真实 HTTP 栈上出现的行为。这里起真进程、打真请求，
+        # 13 项断言里包含「响应到底能不能送回客户端」（413 若被掐连接，单测永远绿）。
+        # 脚本自带端口预检，确保断言打在**本进程**而不是残留实例上。
+        # 不设 SMOKE_SIGN：真签名要读 Fuji，会让 CI 依赖外部节点。
+        env:
+          # 与上面单测同一个测试私钥；只是为了让启动检查通过，不做任何外部写操作
+          SIGNER_PRIVATE_KEY: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+          SMOKE_PORT: "8791"
+        run: bash script/smoke.sh
 
   frontend:
     name: Frontend (test + tsc + eslint)
