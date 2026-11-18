@@ -17,6 +17,7 @@ import {
   rpcHealth,
   installProcessGuard,
   healthStatus,
+  validUserImage,
   type ClosableServer,
 } from "../src/server.ts";
 import { type Allowlist } from "../src/allowlist.ts";
@@ -317,6 +318,37 @@ test("server: /sign imageURI 非法返回 400（只收 http(s)/ipfs/data:image�
   );
   assert.equal(res.statusCode, 400);
   assert.match(res._body, /imageURI/);
+});
+
+test("server: imageURI 含引号/反斜杠/控制字符 → 400（否则链上 tokenURI 是非法 JSON）", async () => {
+  /**
+   * 合约 tokenURI 直接用字符串拼 JSON，不转义：`"image":"<uri>"`。
+   * 只要 uri 里有一个 `"`，整份元数据就坏了 —— 而且是写进链上、永久坏掉，
+   * 钱包读不出来、前端只能显示「无图」，没有任何补救手段。
+   * 内联 SVG 的 data URI 天然带双引号，是最容易踩到的形态。
+   */
+  const bad = [
+    'https://example.com/a"b.png',
+    "https://example.com/a\\b.png",
+    "https://example.com/a\nb.png",
+    'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+  ];
+  for (const [i, uri] of bad.entries()) {
+    const res = mockRes();
+    await handler(postSign({ wallet: ANVIL_ADDR_0, imageURI: uri }, `21.21.21.${i + 1}`), res, {
+      signer: new ethers.Wallet(ANVIL_KEY_0),
+      allowlist: { [ANVIL_ADDR_0]: { limit: 3 } } as Allowlist,
+      numberMintedOnChain: async () => 0,
+    });
+    assert.equal(res.statusCode, 400, `应拒绝：${JSON.stringify(uri)}`);
+    assert.match(res._body, /引号|反斜杠/, "错误文案要说清为什么，否则用户只会换个写法继续撞");
+  }
+
+  // 百分号编码的引号是合法文本，不该被误杀（直接测纯函数：走 /sign 会留下
+  // 一个 1 小时不释放的 in-flight 名额，污染后面用例的配额断言）
+  assert.equal(validUserImage("https://example.com/a%22b.png"), true);
+  assert.equal(validUserImage("https://example.com/x.png"), true);
+  assert.equal(validUserImage("data:image/png;base64,iVBORw0KGgo="), true);
 });
 
 test("server: /sign 链上配额核验失败（RPC 不可达）返回 503（fail-closed）", async () => {

@@ -222,13 +222,23 @@ export async function readBody(req: IncomingMessage): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-/** 用户自选图校验：http(s)/ipfs/data 开头 + 长度上限 */
-function validUserImage(uri: string): boolean {
-  return (
-    uri.length >= 8 &&
-    uri.length <= 500 &&
-    /^(https?:\/\/|ipfs:\/\/|data:image\/)/i.test(uri)
-  );
+/**
+ * 用户自选图校验：http(s)/ipfs/data 开头 + 长度上限 + **不能破坏 tokenURI 的 JSON**。
+ *
+ * 合约 tokenURI 是拿字符串拼 JSON 的（`'"image":"' + imageURI + '"'`），
+ * 不做任何转义。所以只要 URL 里出现一个 `"`、`\` 或控制字符，整份元数据就
+ * 成了非法 JSON —— 而且这是**写进链上的**：钱包/市场永远读不出来，前端
+ * 只能显示「无图」，谁也改不回来。
+ *
+ * 这不只是理论：`data:image/svg+xml,<svg xmlns="…">` 这种内联 SVG 天然带
+ * 双引号，完全能通过前缀校验。与其签出一个永久坏掉的 NFT，不如在这里拒掉，
+ * 并告诉用户改成 base64 形式。
+ */
+export function validUserImage(uri: string): boolean {
+  if (uri.length < 8 || uri.length > 500) return false;
+  if (!/^(https?:\/\/|ipfs:\/\/|data:image\/)/i.test(uri)) return false;
+  // " \ 与 C0/DEL 控制字符（含换行）都会让 JSON 非法
+  return !/["\\\u0000-\u001F\u007F]/.test(uri);
 }
 
 /**
@@ -584,7 +594,12 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
           let finalUri = imageURI;
           if (imageURI !== undefined) {
             if (typeof imageURI !== "string" || !validUserImage(imageURI)) {
-              return send(req, res, 400, { error: "imageURI 非法：需 http(s)/ipfs/data:image 开头且 ≤500 字符" });
+              return send(req, res, 400, {
+                error:
+                  "imageURI 非法：需 http(s)/ipfs/data:image 开头、≤500 字符，" +
+                  "且不能含引号 / 反斜杠 / 控制字符（会破坏链上 tokenURI 的 JSON；" +
+                  "内联 SVG 请改用 base64 形式）",
+              });
             }
         } else {
           // fail-closed：与 numberMinted 同一套口径——读不到 null → 503。

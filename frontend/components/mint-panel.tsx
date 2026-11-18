@@ -335,7 +335,7 @@ export default function MintPanel({
         </label>
         <input
           className={inputCls}
-          placeholder="https://… 或 ipfs://… 或 data:image/…（≤500 字符）"
+          placeholder="https://… 或 ipfs://… 或 data:image/…（≤500 字符，不能含引号）"
           value={customUri}
           onChange={(e) => setCustomUri(e.target.value)}
           disabled={busy !== null}
