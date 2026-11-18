@@ -332,6 +332,37 @@ test("server: /allowlist 白名单内 RPC 不可达时 minted/remaining 为 null
   assert.equal(body.remaining, null); // 未知
 });
 
+test("server: /allowlist RPC 挂住时按「未知」返回，不把请求吊死", async () => {
+  // 前端每 4s 轮询一次、15s 自行 abort。服务端若没有超时兜底，每次轮询都会
+  // 留下一个永不 settle 的 RPC 调用 —— 轮询越久堆得越多，最后 fd 被吃光。
+  const started = Date.now();
+  const res = mockRes();
+  await handler(getAllowlist(ANVIL_ADDR_0, "3.3.3.9"), res, {
+    allowlist: { [ANVIL_ADDR_0]: { limit: 3 } } as Allowlist,
+    numberMintedOnChain: () => new Promise<number | null>(() => {}), // 永不 settle
+    rpcTimeoutMs: 30,
+  });
+  assert.equal(res.statusCode, 200);
+  const body = JSON.parse(res._body);
+  assert.equal(body.allowlisted, true);
+  assert.equal(body.minted, null, "超时 = 未知，不能编成 0（那会显示成「还能领 3 张」）");
+  assert.equal(body.remaining, null);
+  assert.ok(Date.now() - started < 1000, "必须在超时后返回，而不是等 RPC 自己放弃");
+});
+
+test("server: /sign RPC 挂住时按超时 fail-closed 返回 503", async () => {
+  const started = Date.now();
+  const res = mockRes();
+  await handler(postSign({ wallet: ANVIL_ADDR_0 }, "3.3.3.10"), res, {
+    signer: new ethers.Wallet(ANVIL_KEY_0),
+    allowlist: { [ANVIL_ADDR_0]: { limit: 3 } } as Allowlist,
+    numberMintedOnChain: () => new Promise<number | null>(() => {}), // 永不 settle
+    rpcTimeoutMs: 30,
+  });
+  assert.equal(res.statusCode, 503, "读不到配额就不签，宁可拒也不猜");
+  assert.ok(Date.now() - started < 1000);
+});
+
 test("server: /allowlist 不在白名单时 minted/remaining 为 0（非 null）", async () => {
   const res = mockRes();
   await handler(getAllowlist(ANVIL_ADDR_0, "3.3.3.3"), res, {

@@ -274,6 +274,11 @@ export type HandlerDeps = {
   inflight?: InflightSlots;
   /** 注入按钱包串行的锁（默认 = 模块级） */
   locks?: KeyedLock;
+  /**
+   * 注入链上读取超时（默认 = RPC_QUERY_TIMEOUT_MS）。
+   * 单测用它把 8s 压到几十毫秒，才能验证「RPC 挂住 → 不挂请求」。
+   */
+  rpcTimeoutMs?: number;
 };
 
 /** 已签发未上链的签名槽位：防并发突破配额（见 inflight.ts） */
@@ -380,6 +385,7 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
   const _inflight = deps.inflight ?? inflight;
   const _locks = deps.locks ?? locks;
   const _totalSupply = deps.totalSupplyOnChain ?? totalSupplyOnChain;
+  const _rpcTimeout = deps.rpcTimeoutMs ?? RPC_QUERY_TIMEOUT_MS;
   reqStart.set(req, Date.now());
 
   if (req.method === "OPTIONS") {
@@ -449,7 +455,11 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
         // 与 /sign 同一套口径：已铸 + 已签未上链 都算占用。
         // 否则前端会显示 remaining=3，用户点下去却吃 403（有签名在飞）。
         pendingOut = _inflight.count(wallet);
-        const m = await _numMinted(wallet);
+        // 与 /sign 同一套超时口径。少了这层，RPC 挂住时这个请求会一直吊着：
+        // 前端每 4s 轮询一次、每次 15s 超时后自行 abort，服务端却仍留着
+        // 一个永不 settle 的调用 —— 轮询越久堆积越多，最后 fd/连接被吃光。
+        // 超时 → null → 前端已有的「配额核验中」分支（不明说成 0 张）。
+        const m = await withTimeout(_numMinted(wallet), _rpcTimeout);
         if (m === null) {
           mintedOut = null;
           remainingOut = null;
@@ -510,7 +520,7 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
         try {
           // fail-closed：RPC 不可达 / 查询超时 → minted 未知，宁可拒签也不要越权签发
           // （合约 v3 没有 per-wallet 硬上限，配额全靠后端签名把关）
-          const minted = await withTimeout(_numMinted(addr), RPC_QUERY_TIMEOUT_MS);
+          const minted = await withTimeout(_numMinted(addr), _rpcTimeout);
           if (minted === null) {
             return send(req, res, 503, { error: "链上配额核验失败（RPC 不可达），请稍后重试" });
           }
@@ -540,7 +550,7 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
           // fail-closed：与 numberMinted 同一套口径——读不到 null → 503。
           // 旧的 (?? 0) 会让序号退回到水位线之下，进而撞到之前发过的图：
           // usedHashes 键含 deadline，新签名去重挡不住 → 同一钱包铸两张同图。
-          const supply = await withTimeout(_totalSupply(), RPC_QUERY_TIMEOUT_MS);
+          const supply = await withTimeout(_totalSupply(), _rpcTimeout);
           if (supply === null) {
             return send(req, res, 503, { error: "链上总量核验失败（RPC 不可达），请稍后重试" });
           }
