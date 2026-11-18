@@ -40,7 +40,16 @@ function fmtExpiry(sec: number | null | undefined): string {
  *  ② 选图：留空 = 后端分配创世图；填 URL = 自己的图
  *  ③ POST /sign → {imageURI, deadline, signature} → 调合约 mint(imageURI, deadline, signature)
  */
-export default function MintPanel({ priceWei = 0n, priceReady = false }: { priceWei?: bigint; priceReady?: boolean }) {
+export default function MintPanel({
+  priceWei = 0n,
+  priceReady = false,
+  priceError = false,
+}: {
+  priceWei?: bigint;
+  priceReady?: boolean;
+  /** 读链上 price() 失败（RPC 不可达 / 合约地址错）：与「还在读」要分开说 */
+  priceError?: boolean;
+}) {
   const { address, isConnected, chainId } = useAccount();
   const { writeContractAsync } = useWriteContract();
 
@@ -251,8 +260,14 @@ export default function MintPanel({ priceWei = 0n, priceReady = false }: { price
       )}
 
       {!priceReady && !backendDown && (
-        <p className="rounded-lg bg-yellow-50 p-3 text-sm text-yellow-800">
-          ⏳ 正在读取合约价格（owner 可能设了单价），完成后即可 mint。
+        <p
+          className={`rounded-lg p-3 text-sm ${
+            priceError ? "bg-red-50 text-red-700" : "bg-yellow-50 text-yellow-800"
+          }`}
+        >
+          {priceError
+            ? "⚠ 读取链上价格失败（RPC 不可达 / 合约地址不对），暂时不能 mint——恢复后会自动解除，也可刷新页面重试。"
+            : "⏳ 正在读取合约价格（owner 可能设了单价），完成后即可 mint。"}
         </p>
       )}
 
@@ -310,7 +325,9 @@ export default function MintPanel({ priceWei = 0n, priceReady = false }: { price
               : backendDown
               ? "⏳ 签名服务不可用"
               : !priceReady
-              ? "⏳ 读取价格中…"
+              ? priceError
+                ? "⚠ 价格读取失败"
+                : "⏳ 读取价格中…"
               : quotaExpired
                 ? "⌛ 资格已过期"
                 : quotaUnknown

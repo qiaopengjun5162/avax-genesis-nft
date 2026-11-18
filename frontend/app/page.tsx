@@ -1,7 +1,7 @@
 "use client";
 
 import { formatEther } from "viem";
-import { useReadContract } from "wagmi";
+import { useReadContracts } from "wagmi";
 import { CONTRACT_ADDRESS, STATUS_TEXT } from "@/lib/config";
 import { genesisMintAbi } from "@/lib/abi";
 import ConnectButton from "@/components/connect-button";
@@ -9,53 +9,53 @@ import MintPanel from "@/components/mint-panel";
 import Gallery from "@/components/gallery";
 
 export default function Home() {
-  // 轮询：mint 上链后 stats 自动更新（治 wagmi 读的陈旧显示）
-  const poll = { refetchInterval: 3000 } as const;
-  const { data: name } = useReadContract({
-    address: CONTRACT_ADDRESS,
-    abi: genesisMintAbi,
-    functionName: "name",
-    query: poll,
+  /**
+   * 6 个只读值合成一次 multicall。
+   *
+   * 原来每个字段各挂一个 useReadContract + 3s 轮询：一个页面 6 次
+   * eth_call，加上画廊的 2 次，公共 Fuji 节点很容易被自己的轮询打出
+   * 429。multicall 在同一个块高度一次性取回，既省请求数，也避免
+   * 「已铸用旧块、MAX_SUPPLY 用新块」这种同一屏数据不一致。
+   *
+   * allowFailure：单个 view 失败不该让整屏数据全空（例如 owner 换过
+   * 合约实现、某个字段不存在）。失败的那一项拿 status === "failure"。
+   */
+  const { data, error, refetch } = useReadContracts({
+    allowFailure: true,
+    contracts: [
+      { address: CONTRACT_ADDRESS, abi: genesisMintAbi, functionName: "name" },
+      { address: CONTRACT_ADDRESS, abi: genesisMintAbi, functionName: "symbol" },
+      { address: CONTRACT_ADDRESS, abi: genesisMintAbi, functionName: "status" },
+      { address: CONTRACT_ADDRESS, abi: genesisMintAbi, functionName: "totalSupply" },
+      { address: CONTRACT_ADDRESS, abi: genesisMintAbi, functionName: "MAX_SUPPLY" },
+      { address: CONTRACT_ADDRESS, abi: genesisMintAbi, functionName: "price" },
+    ],
+    query: { refetchInterval: 3000 },
   });
-  const { data: symbol } = useReadContract({
-    address: CONTRACT_ADDRESS,
-    abi: genesisMintAbi,
-    functionName: "symbol",
-    query: poll,
-  });
-  const { data: status } = useReadContract({
-    address: CONTRACT_ADDRESS,
-    abi: genesisMintAbi,
-    functionName: "status",
-    query: poll,
-  });
-  const { data: totalSupply } = useReadContract({
-    address: CONTRACT_ADDRESS,
-    abi: genesisMintAbi,
-    functionName: "totalSupply",
-    query: poll,
-  });
-  // 链上真实读：owner 调整单价 / 改最大供给时，前端不再"过期"
-  const { data: maxSupply } = useReadContract({
-    address: CONTRACT_ADDRESS,
-    abi: genesisMintAbi,
-    functionName: "MAX_SUPPLY",
-    query: poll,
-  });
-  const { data: priceWei } = useReadContract({
-    address: CONTRACT_ADDRESS,
-    abi: genesisMintAbi,
-    functionName: "price",
-    query: poll,
-  });
+
+  const [nameR, symbolR, statusR, supplyR, maxR, priceR] = data ?? [];
+  /** 取成功的返回值；失败/未加载 → undefined（不要伪造成 0） */
+  const val = <T,>(r: { status: string; result?: unknown } | undefined): T | undefined =>
+    r?.status === "success" ? (r.result as T) : undefined;
+
+  const name = val<string>(nameR);
+  const symbol = val<string>(symbolR);
+  const status = val<number>(statusR);
+  const totalSupply = val<bigint>(supplyR);
+  const maxSupply = val<bigint>(maxR);
+  const priceWei = val<bigint>(priceR);
+
+  // 整批读失败（RPC 不可达 / 合约地址错）与「某一项失败」要分开说：
+  // 前者是网络/配置问题，后者多半是合约实现变了。都不该静默显示成 0。
+  const priceFailed = priceR?.status === "failure";
+  const rpcDown = Boolean(error);
 
   return (
     <main className="mx-auto max-w-3xl px-4 py-10">
       <div className="mb-8 flex items-start justify-between">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">
-            {String(name ?? "GenesisMint")}{" "}
-            <span className="text-gray-400">({String(symbol ?? "")})</span>
+            {name ?? "GenesisMint"} <span className="text-gray-400">({symbol ?? ""})</span>
           </h1>
           <p className="mt-1 text-sm text-gray-500">
             Avalanche Fuji 上的 ECDSA 白名单创世 NFT——白名单钱包按配额 mint（可领多张），
@@ -66,6 +66,19 @@ export default function Home() {
         <ConnectButton />
       </div>
 
+      {rpcDown && (
+        <div className="mb-6 rounded-lg bg-red-50 p-3 text-sm text-red-700">
+          <p>链上数据读取失败（RPC 不可达 / 合约地址不对 / 被限流），下面的数字不是真实值。</p>
+          <button
+            type="button"
+            onClick={() => void refetch()}
+            className="mt-2 rounded-md border border-red-300 px-3 py-1 text-xs hover:bg-red-100"
+          >
+            重试
+          </button>
+        </div>
+      )}
+
       <div className="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-4">
         <Stat
           label="已铸"
@@ -75,21 +88,21 @@ export default function Home() {
               : `${Number(totalSupply ?? 0n)} / …`
           }
         />
-        <Stat label="状态" value={STATUS_TEXT[Number(status ?? 0n)] ?? "?"} />
+        <Stat label="状态" value={STATUS_TEXT[status ?? 0] ?? "?"} />
         <Stat
           label="价格"
-          value={
-            priceWei != null
-              ? `${Number(formatEther(priceWei as bigint)).toString()} AVAX`
-              : "…"
-          }
+          value={priceWei !== undefined ? `${Number(formatEther(priceWei))} AVAX` : "…"}
         />
         <Stat label="网络" value="Fuji 43113" />
       </div>
 
       <section className="mb-10 rounded-2xl border border-gray-200 p-6">
         <h2 className="mb-4 text-lg font-semibold">Mint</h2>
-        <MintPanel priceWei={typeof priceWei === "bigint" ? priceWei : 0n} priceReady={priceWei !== undefined} />
+        <MintPanel
+          priceWei={priceWei ?? 0n}
+          priceReady={priceWei !== undefined}
+          priceError={priceFailed || rpcDown}
+        />
       </section>
 
       <Gallery />
