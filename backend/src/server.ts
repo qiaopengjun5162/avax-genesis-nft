@@ -119,8 +119,14 @@ function tooMany(req: IncomingMessage, res: ServerResponse, limiter: RateLimiter
 
 /** SIGHUP 热加载白名单：改配额不必重启服务 */
 function reloadAllowlist() {
-  allowlist = loadAllowlist();
-  console.log(`🔄 白名单已重载：${Object.keys(allowlist).length} 个钱包`);
+  const previous = allowlist;
+  // 传上一版作 fallback：编辑文件时的「截断→写入」中间态若恰好被 SIGHUP
+  // 撞上，读/解析失败会保留旧名单，而不是把所有人一起变成 403。
+  allowlist = loadAllowlist(undefined, previous);
+  console.log(
+    `🔄 白名单已重载：${Object.keys(allowlist).length} 个钱包` +
+      (allowlist === previous ? "（读取失败，仍用上一版）" : ""),
+  );
 }
 
 const CORS_METHODS = {

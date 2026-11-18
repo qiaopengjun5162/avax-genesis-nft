@@ -53,9 +53,28 @@ test("allowlist: 加载时小写地址也被归一为 checksum", async () =>
     assert.equal(list[A].limit, 3);
   }));
 
-test("allowlist: 文件缺失静默返回空对象", async () => {
-  const list = loadAllowlist("/definitely/does/not/exist/" + Date.now() + ".json");
+/** 捕获并断言「有告警」——静默故障的病根就是没人喊，必须测到日志这一层 */
+function captureConsoleError(fn: () => void): string[] {
+  const original = console.error;
+  const lines: string[] = [];
+  console.error = (...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  };
+  try {
+    fn();
+  } finally {
+    console.error = original;
+  }
+  return lines;
+}
+
+test("allowlist: 文件缺失 → 空名单 + 告警（干净部署可接受的 fail-closed）", async () => {
+  let list: ReturnType<typeof loadAllowlist> = {};
+  const logs = captureConsoleError(() => {
+    list = loadAllowlist("/definitely/does/not/exist/" + Date.now() + ".json");
+  });
   assert.deepEqual(list, {});
+  assert.ok(logs.some((l) => l.includes("文件不存在")), "缺文件也必须留痕");
 });
 
 test("allowlist: 缺 limit 字段或非法 → 默认 1", async () =>
@@ -153,4 +172,50 @@ test("allowlist: 非法地址 isAllowlisted / entryFor 都返回空、不抛", a
     // entryFor 走的是同一条 getAddress 兜底：抛错要吞成 undefined，
     // 不能让一个坏地址把 /sign 打成 500
     assert.equal(entryFor("not-an-address", list), undefined);
+  }));
+
+test("allowlist: 文件损坏 → 保留上一版并告警（SIGHUP 撞上编辑中间态不清空）", async () =>
+  withTempAllowlist("{ this is not json", (p) => {
+    const previous = { [A]: { limit: 3 } };
+    let list: ReturnType<typeof loadAllowlist> = {};
+    const logs = captureConsoleError(() => {
+      list = loadAllowlist(p, previous);
+    });
+    assert.deepEqual(list, previous, "读/解析失败必须回退上一版，不能把好名单清成 {}");
+    assert.ok(
+      logs.some((l) => l.includes("读取/解析失败") && l.includes("保留上一版")),
+      "必须喊出来：静默清空正是这次要修的病",
+    );
+  }));
+
+test("allowlist: 顶层是 null / 数组 / 字符串也算损坏，回退 + 告警", async () => {
+  for (const bad of ["null", "[]", '"just a string"']) {
+    await withTempAllowlist(bad, (p) => {
+      const previous = { [A]: { limit: 2 } };
+      let list: ReturnType<typeof loadAllowlist> = {};
+      const logs = captureConsoleError(() => {
+        list = loadAllowlist(p, previous);
+      });
+      assert.deepEqual(list, previous, `${bad} 不是名单结构，必须回退`);
+      assert.ok(logs.some((l) => l.includes("顶层不是对象")));
+    });
+  }
+});
+
+test("allowlist: 文件缺失但有上一版 → 也保留上一版（热加载误触不误伤）", async () => {
+  const previous = { [A]: { limit: 4 } };
+  let list: ReturnType<typeof loadAllowlist> = {};
+  const logs = captureConsoleError(() => {
+    list = loadAllowlist("/definitely/does/not/exist/" + Date.now() + ".json", previous);
+  });
+  assert.deepEqual(list, previous);
+  assert.ok(logs.some((l) => l.includes("文件不存在") && l.includes("保留上一版")));
+});
+
+test("allowlist: 加载成功时忽略 fallback，用文件里的新内容", async () =>
+  withTempAllowlist(JSON.stringify({ [B]: { limit: 9 } }), async (p) => {
+    const previous = { [A]: { limit: 1 } };
+    const list = loadAllowlist(p, previous);
+    assert.equal(list[B].limit, 9, "成功加载必须采用新名单");
+    assert.equal(list[A], undefined, "fallback 只在失败时兜底，不能混进成功结果");
   }));

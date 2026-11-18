@@ -48,29 +48,48 @@ function parseLimit(raw: unknown): number {
 
 export function loadAllowlist(
   path = resolve(import.meta.dirname, "../data/allowlist.json"),
+  /** 读/解析失败时的回退值。启动传空（干净部署），SIGHUP 热重载传上一版。 */
+  fallback: Allowlist = {},
 ): Allowlist {
+  let raw: unknown;
   try {
-    const raw: Allowlist = JSON.parse(readFileSync(path, "utf8"));
-    const out: Allowlist = {};
-    for (const [k, v] of Object.entries(raw)) {
-      let addr: string;
-      try {
-        addr = ethers.getAddress(k);
-      } catch {
-        // 原来一个地址写错 → getAddress 抛错 → 整个 catch 吞掉 → 白名单变空
-        // → 所有人 403 且日志一片安静，极难排查。改成跳过这一条并大声告警。
-        console.warn(`⚠️  白名单跳过非法地址：${k}`);
-        continue;
-      }
-      out[addr] = {
-        limit: parseLimit(v?.limit),
-        expiresAt: parseExpiresAt(v?.expiresAt),
-      };
-    }
-    return out;
-  } catch {
-    return {};
+    raw = JSON.parse(readFileSync(path, "utf8"));
+  } catch (e) {
+    // 「文件不存在」= 干净部署还没配，可接受；「存在但读/解析失败」通常是
+    // 运维正在编辑（截断→写入的中间态）或 SIGHUP 恰好撞上原子替换。
+    // 两种都必须喊出来——原来这里直接 return {}，热重载一次就把整份好名单
+    // 清空、所有人 403，而日志一片安静，只能靠用户投诉才发现。
+    const missing = (e as NodeJS.ErrnoException)?.code === "ENOENT";
+    console.error(
+      `⚠️  白名单${missing ? "文件不存在" : "读取/解析失败"}（${path}）：` +
+        `${missing ? "" : (e as Error).message}；` +
+        `${Object.keys(fallback).length ? "保留上一版名单" : "按空名单处理（所有人将被拒签）"}`,
+    );
+    return fallback;
   }
+  // JSON.parse("null") / "[]" / '"text"' 都是合法 JSON 但不是名单结构，
+  // 直接 Object.entries 会把字符串拆成字符、null 抛错——都归到同一条回退路径。
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    console.error(`⚠️  白名单顶层不是对象（${path}），` +
+      `${Object.keys(fallback).length ? "保留上一版名单" : "按空名单处理（所有人将被拒签）"}`);
+    return fallback;
+  }
+  const out: Allowlist = {};
+  for (const [k, v] of Object.entries(raw as Record<string, AllowlistEntry>)) {
+    let addr: string;
+    try {
+      addr = ethers.getAddress(k);
+    } catch {
+      // 一个地址写错只跳过它，不让整份名单陪葬。
+      console.warn(`⚠️  白名单跳过非法地址：${k}`);
+      continue;
+    }
+    out[addr] = {
+      limit: parseLimit(v?.limit),
+      expiresAt: parseExpiresAt(v?.expiresAt),
+    };
+  }
+  return out;
 }
 
 /**
