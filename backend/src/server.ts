@@ -56,12 +56,18 @@ let allowlist = loadAllowlist();
 /**
  * 匿名端点限流（防 RPC/CPU DoS）。阈值走 .env，缺省：
  *  - /sign       每 IP 60s 内 30 次（签名要读链上 + 可能签名，重）
- *  - /allowlist  每 IP 60s 内 60 次（只读，轻一些）
+ *  - /allowlist  每 IP 60s 内 120 次（只读，轻一些）
+ *
+ * `/allowlist` 的阈值必须跟前端的轮询节奏对得上：前端每 4s 拉一次，
+ * 即 **15 次/分钟/标签页**。原来给 60，意味着同一出口 IP 下 4 个标签页
+ * （或 Nginx 后忘了开 TRUST_PROXY 时的 4 个用户）就会把额度吃光，
+ * 表现为所有人一起 429 —— 限流反而成了自己造的可用性故障。
+ *
  * 多副本部署需把这套迁到 Redis，否则各进程独立计数。
  */
 const SIGN_WINDOW_MS = numEnv("SIGN_RATE_WINDOW_MS", 60_000, { min: 1000 });
 const signLimiter = new RateLimiter(numEnv("SIGN_RATE_LIMIT", 30, { min: 1 }), SIGN_WINDOW_MS);
-const allowlistLimiter = new RateLimiter(numEnv("ALLOWLIST_RATE_LIMIT", 60, { min: 1 }), SIGN_WINDOW_MS);
+const allowlistLimiter = new RateLimiter(numEnv("ALLOWLIST_RATE_LIMIT", 120, { min: 1 }), SIGN_WINDOW_MS);
 
 /**
  * 读整数环境变量并卡住合法范围。

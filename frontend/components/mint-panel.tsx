@@ -1,34 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useEffectEvent, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useRef, useState } from "react";
 import { useAccount, useWriteContract, useWaitForTransactionReceipt } from "wagmi";
 import { CONTRACT_ADDRESS, SIGNER_URL, STATUS_TEXT, explorerTx, FAUCET_URL } from "@/lib/config";
 import { genesisMintAbi } from "@/lib/abi";
 import { resolveImageUrl } from "@/lib/media";
 import { describeHttpFailure, humanizeError, isUserRejection } from "@/lib/errors";
+import { parseQuotaResponse, type Quota } from "@/lib/quota";
 
 const btnPrimary =
   "rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50";
 const inputCls =
   "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none";
-
-type Quota = {
-  allowlisted: boolean;
-  limit: number;
-  // minted/remaining 为 null 表示后端拿不到链上配额（RPC 不可达），
-  // 不要按"还有 N 张"乐观显示，按"未知"渲染 + 禁用 mint 防误签
-  minted: number | null;
-  remaining: number | null;
-  /**
-   * 已签发但还没上链的张数。后端把它算进 remaining 里（防并发超额），
-   * 所以会出现「已领 0 但按钮禁用」——不显示 pending 用户会以为坏了。
-   */
-  pending?: number;
-  /** 白名单资格是否已到期（后端 expiresAt 判定） */
-  expired?: boolean;
-  /** 到期时间（unix 秒），null = 永不过期 */
-  expiresAt?: number | null;
-};
 
 function fmtExpiry(sec: number | null | undefined): string {
   if (!sec) return "";
@@ -64,8 +47,17 @@ export default function MintPanel({
    * 后端整体不可用（没起 / 5xx / 网络不可达）。此时 /allowlist 拿不到配额，
    * 之前是静默吞掉 → 用户还能点 Mint 撞 503。现在显式标出来并禁用按钮，
    * 让 fail-closed 在前端也可见：连不上后端就不该让人去签。
+   *
+   * 注意**不含 429**：限流说明后端活着，只是我们轮询太快（15 次/分钟/标签页，
+   * 多人共用一个出口 IP 时很容易撞）。把它说成「服务不可用」会把人引去查
+   * 后端进程，而且会无辜禁掉 Mint —— 真正的配额判定在后端 /sign。
    */
   const [serviceDown, setServiceDown] = useState(false);
+  const [serviceDetail, setServiceDetail] = useState<string | null>(null);
+  /** 当前处于限流退避期：剩余秒数（0 = 没被限流） */
+  const [rateLimitedSec, setRateLimitedSec] = useState(0);
+  /** 退避截止时间戳。轮询照常 tick，但在截止前直接返回，不再打后端 */
+  const backoffUntil = useRef(0);
 
   const { data: receipt } = useWaitForTransactionReceipt({ hash: txHash as `0x${string}` | undefined });
   const txOk = receipt?.status === "success";
@@ -76,23 +68,39 @@ export default function MintPanel({
   // 连上后预检配额（含轮询，mint 后自动更新）
   const fetchQuota = useCallback(async () => {
     if (!address) return;
+    // 限流退避期：不打后端（否则每 4s 继续撞 429，桶永远不会回血）
+    if (Date.now() < backoffUntil.current) return;
     try {
       // 15s 超时：RPC 慢 + 同钱包锁排队都可能在 8s 上限（RPC_QUERY_TIMEOUT_MS）
       // 之后再卡几秒。给个总上限就免得「按钮卡在 ① 向后端要签名…」。
       const r = await fetch(`${SIGNER_URL}/allowlist/${address}`, {
         signal: AbortSignal.timeout(15_000),
       });
-      if (r.ok) {
-        setQuota(await r.json());
-        setServiceDown(false); // 后端这轮给到了配额 → 恢复
-      } else {
-        // 后端返回错误（503 fail-closed / 429 限流等）：标记服务异常，
-        // 该轮禁用 Mint，避免用户撞 503 才发现问题
-        setServiceDown(true);
+      // 先读文本再解析：网关 5xx 回的是 HTML，直接 r.json() 只会抛
+      // `Unexpected token '<'`，指不到根因
+      const text = await r.text();
+      const outcome = parseQuotaResponse(r.status, text, r.headers.get("retry-after"));
+
+      if (outcome.kind === "ok") {
+        setQuota(outcome.quota);
+        setServiceDown(false);
+        setServiceDetail(null);
+        setRateLimitedSec(0);
+        return;
       }
+      if (outcome.kind === "rate-limited") {
+        // 服务是好的，只是我们太快：保留上一轮配额（比清空更有用），退避重试
+        backoffUntil.current = Date.now() + outcome.retryAfterSec * 1000;
+        setRateLimitedSec(outcome.retryAfterSec);
+        return;
+      }
+      // 真失败：fail-closed，禁用 Mint 并说明原因（别再只说「连不上」）
+      setServiceDown(true);
+      setServiceDetail(outcome.detail);
     } catch {
       // 后端没起 / 超时 / 网络不可达：同样视为服务不可用
       setServiceDown(true);
+      setServiceDetail("请求超时或网络不可达");
     }
   }, [address]);
 
@@ -127,6 +135,10 @@ export default function MintPanel({
     setArtPreview(null);
     setTxHash(null);
     setServiceDown(false);
+    setServiceDetail(null);
+    setRateLimitedSec(0);
+    // 换钱包要清退避：上一个地址撞的限流不该让新地址继续等着
+    backoffUntil.current = 0;
   }, [address]);
 
   async function onMint() {
@@ -257,6 +269,22 @@ export default function MintPanel({
       {backendDown && (
         <p className="rounded-lg bg-yellow-50 p-3 text-sm text-yellow-800">
           ⏳ 签名服务暂时连不上（后端没启动 / 报错 / 网络不可达），连上后会自动恢复——稍等或检查后端进程。
+          {serviceDetail && (
+            <span className="mt-1 block break-all font-mono text-xs text-yellow-700">{serviceDetail}</span>
+          )}
+        </p>
+      )}
+
+      {rateLimitedSec > 0 && !backendDown && (
+        /**
+         * 429 单独说：后端是活的，只是这个 IP 一分钟内轮询太多
+         * （前端每 4s 一次 = 15 次/分钟/标签页，多人共用一个出口 IP 时很容易撞）。
+         * 不显示这句的话，用户会把它当成「服务挂了」；也不该因此禁用 Mint——
+         * 配额是否真的够，最终由后端 /sign 判定。
+         */
+        <p className="rounded-lg bg-yellow-50 p-3 text-sm text-yellow-800">
+          ⏳ 配额刷新被限流（每 IP 每分钟请求数超限），约 {rateLimitedSec} 秒后自动重试。
+          这不影响 mint —— 点按钮后最终以后端校验为准。
         </p>
       )}
 
