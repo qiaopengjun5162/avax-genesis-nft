@@ -148,7 +148,13 @@ expect_code "POST /sign 非白名单 → 403" 403 "$code"
 
 # 别用 /dev/zero 直接喂：那是无限流，curl 会卡到 --max-time 才被掐断，
 # 拿不到任何状态码。要一个有界且明确超过 MAX_BODY_BYTES(8KB) 的 body。
-BIGBODY="$(mktemp -t genesis-bigbody)"
+# 同上：模板必须带 X，否则 GNU mktemp 直接失败 → 文件没建成 → curl 的
+# `--data-binary @""` 读不到数据，状态码变空，只会报「超大 body 被挡下」，
+# 看起来像服务把连接掐了，实际是脚本自己没造出 body。
+BIGBODY="$(mktemp "${TMPDIR:-/tmp}/genesis-bigbody.XXXXXX")" || {
+  echo "❌ 无法创建临时文件（mktemp 失败）" >&2
+  exit 2
+}
 head -c 65536 /dev/zero | tr '\0' 'a' >"$BIGBODY"
 code="$("${CURL[@]}" -X POST -H 'content-type: application/json' --data-binary @"$BIGBODY" -o /dev/null -w '%{http_code}' --max-time 10 "${BASE}/sign" 2>/dev/null)"
 rm -f "$BIGBODY"
