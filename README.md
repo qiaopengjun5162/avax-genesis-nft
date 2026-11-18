@@ -48,6 +48,7 @@ signature = backend.sign(final)
 | fail-closed | RPC 抖动时按 `minted=0` 无限签发 | 读不到链上配额 → 503 拒签，不猜 |
 | in-flight 占位 | 连点 / 并发两个请求读到同一个 `minted`，`limit=1` 签出 2 张 | 签发前同步占位（有效期 = 签名 deadline）+ 同钱包排队；`minted + pending > limit` 即拒 |
 | 配置合法化 | `allowlist.json` 里 `limit` 手滑写成 `"三张"` → `NaN` → `minted + pending > NaN` 恒 false → **无限签发** | 非有限数回落 1 + 告警（`Math.max(1, NaN)` 仍是 `NaN`，不能直接夹） |
+| 元数据完整性 | 合约 `tokenURI` 用字符串拼 JSON，imageURI 里一个 `"` 就让整份元数据变非法 JSON——**写进链上、永久坏掉** | 后端拒收含 `"` / `\` / 控制字符的 imageURI（内联 SVG 请用 base64），错误文案说明原因 |
 | 链上读取超时 | RPC 挂住时请求永不返回，`/allowlist` 每 4s 轮询一次会越堆越多 | 两个端点共用 `RPC_QUERY_TIMEOUT_MS`（默认 8s）；超时 → `null` → 503 / 「配额未知」 |
 | 故障归类 | 把 429 说成「签名服务挂了」→ 用户查错方向，且 Mint 被无辜禁用 | 响应拆成 200 / 429 / 故障三分支：429 保留旧配额 + 按 `retry-after` 退避（退避期不发请求），不锁按钮；5xx/网络不可达才 fail-closed |
 
@@ -214,11 +215,12 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 | 合约 | forge | **35** 全过 | `forge test --force` |
 | 合约 lint | forge lint | 0 警告 | `forge lint` |
 | 合约覆盖率 | lcov | src/GenesisMint.sol 100% (L/S/B/F) | `forge coverage --report summary` |
-| 后端 | node:test | **91** 全过 | `cd backend && npm test` |
+| 后端 | node:test | **92** 全过 | `cd backend && npm test` |
 | 后端冒烟 | curl（真实进程） | 14 项（默认）/ 16 项（`SMOKE_SIGN=1`） | `bash backend/script/smoke.sh`；换端口 `SMOKE_PORT=8792 bash backend/script/smoke.sh` |
 | 前端 | node:test | **44** 全过 | `cd frontend && npm test` |
 | 前端 | tsc | 类型检查 | `cd frontend && npx tsc --noEmit` |
 | 前端 | eslint | 0 error | `cd frontend && npm run lint` |
+| 前端 | next build | 生产构建（含预渲染） | `cd frontend && npx next build` |
 
 前端测试只用 `node:test`（Node 内置）+ `--experimental-strip-types`，**不引入 vitest 等
 新依赖**——本机 I/O 慢，装一整套测试框架代价太大。它盯两类「写错了但不报错」的问题：
@@ -249,6 +251,9 @@ CI：`.github/workflows/ci.yml`，push / PR 到 `main` 触发三 job 并行。co
 前端 ABI 就直接红（曾出现 ABI 停在 v1、缺 `SignatureAlreadyUsed`，表现为 mint 报一个
 无法解读的错误）。backend job 除了单测还会跑**冒烟脚本**——单测用 mock 的 req/res，
 验不到 listen / 端口冲突 / 413 之后能否把响应送回客户端这些真实 HTTP 栈行为。
+frontend job 最后跑 **`next build`**：tsc 只验类型，验不到 client/server 组件边界、
+`next/font` 取字体、以及 4 个静态页的预渲染——这些只在真实构建里暴露。CI 没有
+`.env`，正好顺带覆盖「部署时忘配 `NEXT_PUBLIC_*`」这条路径。
 
 ### 关于前端类型检查 / 构建的耗时（别被本地体感误导）
 
@@ -327,8 +332,12 @@ CI 里 `contracts` job 跑 `forge build`，本地手动同步走脚本。
 ## 已知限制 / TODO
 
 - ERC721AQueryable 暴露 `tokensOfOwner`，但合约字节码变大、部署 gas 略增（只读查询免 gas）
-- ABI selector 列表写死在前端 `mint-panel.tsx`，合约定性调整时需同步（cast sig 验过）：
-  `cast sig "GenesisMint.<Error>()"`
+- **合约 `tokenURI` 不转义 JSON**（`'"image":"' + imageURI + '"'`）：后端已在签发前拒掉
+  `"` / `\` / 控制字符，所以当前链路走不到；但 `name` / `description` 是部署时喂的，
+  带引号同样会弄坏全部元数据。彻底修需要在合约里加 JSON 转义 —— **要重部署**，
+  与「usedHashes 去重键含 deadline」一起等下一次部署拍板
+- 错误提示表在 `frontend/lib/errors.ts`（selector + 函数名双份），合约改 error 签名时
+  `npm test` 会用 ABI 反查并报红；`cast sig "GenesisMint.<Error>()"` 可手工核对
 - 公共 RPC `api.avax-test.network` 偶有限流，必要时换 Ankr / 自己节点：
   - 后端改 `.env` 的 `FUJI_RPC`
   - 前端改 `.env.local` 的 `NEXT_PUBLIC_RPC_URL`（默认还会兜底 PublicNode，viem fallback 自动切）
