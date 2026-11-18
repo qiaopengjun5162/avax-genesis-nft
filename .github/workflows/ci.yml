@@ -21,8 +21,20 @@ jobs:
       - uses: foundry-rs/foundry-toolchain@v1
         with:
           version: nightly
+      # gen-abi.sh 用 node 做 JSON 压缩，显式装一下，别依赖 runner 预装版本
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - name: Build
         run: forge build
+      - name: ABI 漂移检查（前端 lib/genesisMintAbi.json 必须与编译产物一致）
+        # 前端 ABI 是编译产物快照。不同步的话，合约新增的 error/function 前端
+        # 读不到——曾出现「ABI 停在 v1、缺 SignatureAlreadyUsed」，表现为 mint
+        # 报一个无法解读的错误。这里重新生成再比对，改了合约忘了同步就直接红。
+        run: |
+          bash script/gen-abi.sh
+          git diff --exit-code frontend/lib/genesisMintAbi.json \
+            || { echo "❌ 前端 ABI 与合约不一致，请跑 bash script/gen-abi.sh 并提交 diff"; exit 1; }
       - name: Lint
         run: forge lint
       - name: Test

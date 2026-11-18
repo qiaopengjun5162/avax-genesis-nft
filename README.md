@@ -79,7 +79,7 @@ contracts/
   script/gen-abi.sh    重新生成前端 ABI 的小工具
 
 .github/workflows/ci.yml
-  contracts: forge build + lint + test --force
+  contracts: forge build + ABI 漂移检查 + lint + test --force
   backend:   npm ci + npm test
   frontend:  npm ci + npm test + tsc --noEmit + lint
 ```
@@ -205,17 +205,25 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 | 合约覆盖率 | lcov | src/GenesisMint.sol 100% (L/S/B/F) | `forge coverage --report summary` |
 | 后端 | node:test | **85** 全过 | `cd backend && npm test` |
 | 后端冒烟 | curl（真实进程） | 13 项（默认）/ 15 项（`SMOKE_SIGN=1`） | `bash backend/script/smoke.sh`；换端口 `SMOKE_PORT=8792 bash backend/script/smoke.sh` |
-| 前端 | node:test | **9** 全过 | `cd frontend && npm test` |
+| 前端 | node:test | **17** 全过 | `cd frontend && npm test` |
 | 前端 | tsc | 类型检查 | `cd frontend && npx tsc --noEmit` |
 | 前端 | eslint | 0 error | `cd frontend && npm run lint` |
 
 前端测试只用 `node:test`（Node 内置）+ `--experimental-strip-types`，**不引入 vitest 等
-新依赖**——本机 I/O 慢，装一整套测试框架代价太大。它主要盯 `lib/errors.ts`：那里存着
-合约 custom error selector → 人话提示的映射，**写错是静默故障**（匹配不上就走 fallback，
-用户只看到原始报错，没人会来提 bug）。测试用 viem 从 `lib/genesisMintAbi.json` 现算
-selector，不写死任何值——合约改了 error 签名，测试自己会红。
+新依赖**——本机 I/O 慢，装一整套测试框架代价太大。它盯两类「写错了但不报错」的问题：
 
-CI：`.github/workflows/ci.yml`，push / PR 到 `main` 触发三 job 并行。
+- `lib/errors.ts`：合约 custom error selector → 人话提示的映射，**写错是静默故障**
+  （匹配不上就走 fallback，用户只看到原始报错，没人会来提 bug）。测试用 viem 从
+  `lib/genesisMintAbi.json` 现算 selector，不写死任何值——合约改了 error 签名，测试
+  自己会红。
+- `lib/env.ts`：`NEXT_PUBLIC_SIGNER_URL` / `NEXT_PUBLIC_CONTRACT_ADDRESS` 的归一化。
+  空串会拼出相对路径（打到 Next 自己的路由）、尾斜杠会拼出 `//sign`（部分网关 404），
+  这两种都只在部署时暴露，本地 `.env` 写对了永远复现不了。
+
+CI：`.github/workflows/ci.yml`，push / PR 到 `main` 触发三 job 并行。contracts job 里有一步
+**ABI 漂移检查**：重新跑 `script/gen-abi.sh` 再 `git diff --exit-code`，改了合约忘了同步
+前端 ABI 就直接红（曾出现 ABI 停在 v1、缺 `SignatureAlreadyUsed`，表现为 mint 报一个
+无法解读的错误）。
 
 ### 关于前端类型检查 / 构建的耗时（别被本地体感误导）
 
