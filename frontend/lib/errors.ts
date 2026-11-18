@@ -35,6 +35,23 @@ export function humanizeError(e: unknown): string {
   return first.length > 160 ? `${first.slice(0, 160)}…` : first;
 }
 
+/**
+ * HTTP 失败的人话描述。
+ *
+ * 为什么需要：`res.json()` 碰到 HTML 错误页会抛 `Unexpected token '<'`，
+ * 这个报错完全指向不了真因（用户以为前端坏了）。签名服务前面若挂了
+ * Nginx / 网关，5xx 页是 HTML；配错 SIGNER_URL 时也可能是别的服务在应答。
+ * 按响应体特征分开说，能直接把人指向「代理还是后端」。
+ */
+export function describeHttpFailure(status: number, bodyText: string): string {
+  const t = bodyText.trim();
+  if (!t) return `HTTP ${status}（响应体为空：可能是网关拦截，或后端进程已退出）`;
+  if (/^</.test(t)) {
+    return `HTTP ${status}（返回的是网页不是 JSON：多半是反向代理/网关错误，检查 SIGNER_URL 是否指向后端）`;
+  }
+  return `HTTP ${status}：${t.length > 120 ? `${t.slice(0, 120)}…` : t}`;
+}
+
 /** 钱包里点了「拒绝」（code 4001 / UserRejectedRequestError）—— 不算链上失败 */
 export function isUserRejection(e: unknown): boolean {
   if (!(e instanceof Error)) return false;

@@ -7,6 +7,7 @@ import {
 } from "@rainbow-me/rainbowkit/wallets";
 import { createConfig } from "wagmi";
 import { defineChain, fallback, http } from "viem";
+import { normalizeBaseUrl, pickAddress } from "@/lib/env";
 
 /**
  * Fuji RPC 链：
@@ -17,7 +18,7 @@ import { defineChain, fallback, http } from "viem";
  */
 const FUJI_RPC_DEFAULT = "https://api.avax-test.network/ext/bc/C/rpc";
 const FUJI_RPC_FALLBACK = "https://avalanche-fuji-rpc.publicnode.com";
-const fujiRpcPrimary = process.env.NEXT_PUBLIC_RPC_URL?.trim() || FUJI_RPC_DEFAULT;
+const fujiRpcPrimary = normalizeBaseUrl(process.env.NEXT_PUBLIC_RPC_URL, FUJI_RPC_DEFAULT);
 
 /** Avalanche Fuji C-Chain（chainId 43113）——唯一配置的链，杜绝连到主网 */
 export const fuji = defineChain({
@@ -73,13 +74,16 @@ export const wagmiConfig = createConfig({
  * 部署新实例时通过 NEXT_PUBLIC_CONTRACT_ADDRESS 覆盖，避免改源码；
  * 缺省仍是已验证的 Fuji 演示实例。
  */
-export const CONTRACT_ADDRESS = (process.env.NEXT_PUBLIC_CONTRACT_ADDRESS as
-  | `0x${string}`
-  | undefined) ?? "0x48c9F7B4911Da705BD3285173B333b37CcB4a550";
+export const CONTRACT_ADDRESS = pickAddress<`0x${string}`>(
+  process.env.NEXT_PUBLIC_CONTRACT_ADDRESS,
+  "0x48c9F7B4911Da705BD3285173B333b37CcB4a550",
+);
 
 /** 签名后端（Node 服务，见 backend/） */
-export const SIGNER_URL =
-  process.env.NEXT_PUBLIC_SIGNER_URL ?? "http://127.0.0.1:8787";
+export const SIGNER_URL = normalizeBaseUrl(
+  process.env.NEXT_PUBLIC_SIGNER_URL,
+  "http://127.0.0.1:8787",
+);
 
 export const STATUS_TEXT = [
   "⏳ Waiting（未开始）",

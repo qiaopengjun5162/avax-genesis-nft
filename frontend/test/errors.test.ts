@@ -17,7 +17,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { toFunctionSelector } from "viem";
-import { REVERT_HINTS, humanizeError, isUserRejection } from "../lib/errors.ts";
+import { describeHttpFailure, REVERT_HINTS, humanizeError, isUserRejection } from "../lib/errors.ts";
 
 type AbiError = { type: string; name?: string; inputs?: Array<{ type: string }> };
 
@@ -113,4 +113,21 @@ test("isUserRejection: 识别钱包拒绝，不误判普通链上失败", () => 
 
   assert.equal(isUserRejection(new Error("insufficient funds")), false);
   assert.equal(isUserRejection("rejected"), false, "非 Error 不该被当成拒绝");
+});
+
+test("describeHttpFailure: HTML 错误页要指向反向代理，而不是「Unexpected token」", () => {
+  const msg = describeHttpFailure(502, "<html><body>Bad Gateway</body></html>");
+  assert.match(msg, /HTTP 502/);
+  assert.match(msg, /反向代理|网关/);
+  assert.ok(!msg.includes("Unexpected token"));
+});
+
+test("describeHttpFailure: 空响应体单独说明（不是同一句「未知错误」）", () => {
+  assert.match(describeHttpFailure(500, "   "), /响应体为空/);
+});
+
+test("describeHttpFailure: 普通文本体截断到 120 字以内", () => {
+  const out = describeHttpFailure(400, "x".repeat(300));
+  assert.ok(out.length <= 130, `长度 ${out.length} 超限`);
+  assert.ok(out.endsWith("…"));
 });

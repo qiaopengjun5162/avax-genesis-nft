@@ -4,7 +4,7 @@ import { useCallback, useEffect, useEffectEvent, useState } from "react";
 import { useAccount, useWriteContract, useWaitForTransactionReceipt } from "wagmi";
 import { CONTRACT_ADDRESS, SIGNER_URL, STATUS_TEXT, explorerTx, FAUCET_URL } from "@/lib/config";
 import { genesisMintAbi } from "@/lib/abi";
-import { humanizeError, isUserRejection } from "@/lib/errors";
+import { describeHttpFailure, humanizeError, isUserRejection } from "@/lib/errors";
 
 const btnPrimary =
   "rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50";
@@ -136,21 +136,46 @@ export default function MintPanel({ priceWei = 0n, priceReady = false }: { price
         // 即取消，下次点 mint 重新要签名
         signal: AbortSignal.timeout(20_000),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        setError(`签名服务拒绝：${data.error ?? res.status}`);
-        setBusy(null);
+      // 先读文本再自己 parse：直接 res.json() 碰到 HTML 错误页（Nginx/网关
+      // 5xx、SIGNER_URL 配错打到别的服务）会抛 `Unexpected token '<'`，
+      // 那个报错指向不了真因。非 JSON 时交给 describeHttpFailure 说清楚。
+      const text = await res.text();
+      let parsed: Record<string, unknown> | null = null;
+      try {
+        const v: unknown = text ? JSON.parse(text) : null;
+        if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+          parsed = v as Record<string, unknown>;
+        }
+      } catch {
+        /* 非 JSON：parsed 保持 null，下面按 HTTP 失败处理 */
+      }
+      if (!res.ok || parsed === null) {
+        const msg =
+          typeof parsed?.error === "string" ? parsed.error : describeHttpFailure(res.status, text);
+        setError(`签名服务拒绝：${msg}`);
         return;
       }
-      setArtPreview(data.imageURI);
-      // 后端返回的 remaining 已扣掉这张刚签的（含在飞的），直接用
-      setQuota({
-        minted: data.minted,
-        limit: data.limit,
-        remaining: data.remaining,
-        pending: (quota?.pending ?? 0) + 1,
+
+      // 字段形状校验：后端升/降级导致字段缺失时，别把 undefined 交给钱包
+      // （那样报错会变成 "cannot convert undefined to bigint"，完全查不到源头）
+      const { imageURI, deadline, signature } = parsed;
+      if (typeof imageURI !== "string" || typeof deadline !== "number" || typeof signature !== "string") {
+        setError("签名服务返回的字段不全（imageURI / deadline / signature），前后端版本可能不一致");
+        return;
+      }
+
+      setArtPreview(imageURI);
+      // 后端返回的 remaining 已扣掉这张刚签的（含在飞的），直接用；
+      // 用 updater 拿 prev（而不是闭包里的 quota），避免读到上一轮的旧值
+      const numOr = <T extends number | null>(v: unknown, fallback: T): number | T =>
+        typeof v === "number" ? v : fallback;
+      setQuota((prev) => ({
+        minted: numOr(parsed.minted, prev?.minted ?? null),
+        limit: numOr(parsed.limit, prev?.limit ?? 0),
+        remaining: numOr(parsed.remaining, prev?.remaining ?? null),
+        pending: (prev?.pending ?? 0) + 1,
         allowlisted: true,
-      });
+      }));
 
       // ② 带签名上链（deadline 由后端签发，签名绑定，前端原样透传）
       setBusy("mining");
@@ -158,7 +183,7 @@ export default function MintPanel({ priceWei = 0n, priceReady = false }: { price
         address: CONTRACT_ADDRESS,
         abi: genesisMintAbi,
         functionName: "mint",
-        args: [data.imageURI, data.deadline as number, data.signature as `0x${string}`],
+        args: [imageURI, deadline, signature as `0x${string}`],
         // value 必须等于链上 price()：合约 mint 是 payable 且 `if (msg.value < price)
         // revert EtherAmountMismatch`。之前硬编码 0n，owner 一旦 setPrice 设价 mint
         // 必失败。price 由 page 读链上 price 传入，与展示一致。
