@@ -60,6 +60,7 @@ frontend/             Next.js 16 + wagmi + RainbowKit + viem
   components/         mint-panel / gallery / connect-button
   lib/abi.ts          viem 的 ABI 类型（顶层 import JSON，故不含纯逻辑）
   lib/token-uri.ts    tokenURI 的 base64 解码（可被 node:test 直接跑）
+  lib/media.ts        图片 URL 归一化（ipfs:// → 网关；否则浏览器显示破图）
   lib/config.ts       Fuji 链定义 / CONTRACT_ADDRESS / SIGNER_URL
   lib/genesisMintAbi.json  ← 脚本生成（勿手改）
 
@@ -208,7 +209,7 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 | 合约覆盖率 | lcov | src/GenesisMint.sol 100% (L/S/B/F) | `forge coverage --report summary` |
 | 后端 | node:test | **89** 全过 | `cd backend && npm test` |
 | 后端冒烟 | curl（真实进程） | 13 项（默认）/ 15 项（`SMOKE_SIGN=1`） | `bash backend/script/smoke.sh`；换端口 `SMOKE_PORT=8792 bash backend/script/smoke.sh` |
-| 前端 | node:test | **24** 全过 | `cd frontend && npm test` |
+| 前端 | node:test | **31** 全过 | `cd frontend && npm test` |
 | 前端 | tsc | 类型检查 | `cd frontend && npx tsc --noEmit` |
 | 前端 | eslint | 0 error | `cd frontend && npm run lint` |
 
@@ -225,6 +226,9 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 - `lib/token-uri.ts`：`tokenURI` 的 base64 解码。它坏掉时什么都不报——画廊只是不出图、
   名字退回 `#id`。测试覆盖非 data URI、坏 base64、JSON 不是对象（`"123"` 曾被当成
   元数据返回）、空/空白字段，以及中文名的 UTF-8 解码（`atob` 直接当文本会乱码）。
+- `lib/media.ts`：`ipfs://` → 网关 URL 的转换。后端**允许**用户用 `ipfs://` 作 imageURI，
+  合约原样存；浏览器不认这个 scheme，直接渲染就是破图——用户会以为 NFT 的图丢了。
+  网关可用 `NEXT_PUBLIC_IPFS_GATEWAY` 覆盖（公共 ipfs.io 慢且限流）。
 
 CI：`.github/workflows/ci.yml`，push / PR 到 `main` 触发三 job 并行。contracts job 里有一步
 **ABI 漂移检查**：重新跑 `script/gen-abi.sh` 再 `git diff --exit-code`，改了合约忘了同步
