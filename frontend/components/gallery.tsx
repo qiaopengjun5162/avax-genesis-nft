@@ -3,7 +3,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { useAccount, usePublicClient, useReadContract } from "wagmi";
 import { CONTRACT_ADDRESS } from "@/lib/config";
-import { genesisMintAbi, decodeTokenUri, shortAddr } from "@/lib/abi";
+import { genesisMintAbi, shortAddr } from "@/lib/abi";
+import { decodeTokenUri } from "@/lib/token-uri";
 
 type Nft = {
   tokenId: number;
@@ -41,7 +42,7 @@ export default function Gallery() {
   const totalNum = Number(totalSupply ?? 0n);
   const maxNum = maxSupply === undefined ? null : Number(maxSupply);
 
-  const { data: mine, isFetching } = useQuery({
+  const { data: mine, error, isFetching, refetch } = useQuery({
     queryKey: ["my-nfts", address, totalNum],
     enabled: Boolean(address && publicClient),
     refetchInterval: 4000,
@@ -88,12 +89,42 @@ export default function Gallery() {
 
       {!address ? (
         <p className="text-sm text-gray-500">连接钱包后展示你的藏品。</p>
+      ) : error ? (
+        /**
+         * 读链失败必须单独说清。之前这里和「空列表」共用同一个分支，
+         * RPC 挂了 / 合约地址配错 / 限流，用户看到的都是「你还没有 NFT」
+         * ——把故障说成事实，他只会以为自己的 NFT 丢了。
+         */
+        <div className="rounded-lg bg-red-50 p-3 text-sm text-red-700">
+          <p>画廊读取失败（RPC 不可达 / 合约地址不对 / 被限流），这不代表你没有 NFT。</p>
+          <p className="mt-1 break-all font-mono text-xs text-red-600">
+            {error instanceof Error ? error.message : String(error)}
+          </p>
+          <button
+            type="button"
+            onClick={() => void refetch()}
+            className="mt-2 rounded-md border border-red-300 px-3 py-1 text-xs hover:bg-red-100"
+          >
+            重试
+          </button>
+        </div>
       ) : mine && mine.length > 0 ? (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
           {mine.map((n) => (
             <div key={n.tokenId} className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={n.meta?.image} alt={n.meta?.name} className="aspect-square w-full bg-gray-200 object-cover" />
+              {/* 元数据缺失/没图时不要渲染 <img src={undefined}>：那是一个破图图标 */}
+              {n.meta?.image ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={n.meta.image}
+                  alt={n.meta.name ?? `#${n.tokenId}`}
+                  className="aspect-square w-full bg-gray-200 object-cover"
+                />
+              ) : (
+                <div className="flex aspect-square w-full items-center justify-center bg-gray-100 text-xs text-gray-400">
+                  无图
+                </div>
+              )}
               <div className="p-3">
                 <p className="text-sm font-semibold text-gray-900">{n.meta?.name ?? `#${n.tokenId}`}</p>
                 <p className="mt-0.5 text-xs text-gray-500">owner {shortAddr(n.owner)}</p>
@@ -101,10 +132,13 @@ export default function Gallery() {
             </div>
           ))}
         </div>
-      ) : (
+      ) : mine ? (
         <p className="text-sm text-gray-500">
           {totalNum === 0 ? "还没有任何人 mint。" : "你还没有 NFT——点上面按钮领一张。"}
         </p>
+      ) : (
+        // 首次加载：既不是「没有」，也还不到报错的时候
+        <p className="text-sm text-gray-500">正在读取你的 NFT…</p>
       )}
     </div>
   );
