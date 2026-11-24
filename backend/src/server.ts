@@ -535,6 +535,10 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
           mintedOut = null;
           remainingOut = null;
         } else {
+          // 与 /sign 同一套口径：先按下已铸数量释放对应槽位，再数 pending。
+          // 少了这步，前端会一直显示「已铸 1 + 待上链 1」，余额凭空少一张。
+          _inflight.reconcileMinted(wallet, m);
+          pendingOut = _inflight.count(wallet);
           mintedOut = m;
           remainingOut = Math.max(0, entry.limit - m - pendingOut);
         }
@@ -586,15 +590,21 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
       // 两个请求同时占位、各自数到 pending=2，双双被拒。
       const deadline = Math.floor(Date.now() / 1000) + SIGN_DEADLINE_SECONDS;
       return await _locks.run(addr, async () => {
+        // fail-closed：RPC 不可达 / 查询超时 → minted 未知，宁可拒签也不要越权签发
+        // （合约 v3 没有 per-wallet 硬上限，配额全靠后端签名把关）
+        const minted = await withTimeout(_numMinted(addr), _rpcTimeout);
+        if (minted === null) {
+          return send(req, res, 503, { error: "链上配额核验失败（RPC 不可达），请稍后重试" });
+        }
+        // 签名上链后释放对应槽位：否则已上链的那张会在 minted 和 pending
+        // 里被算两次，用户铸完第 1 张后 1h 内签不了第 2 张。
+        // 必须在 claim 之前对账，链上 minted 跳多张时才不会误伤本次刚占的位。
+        _inflight.reconcileMinted(addr, minted);
+
+        // 同钱包已被 KeyedLock 串行，await 之后再占位没有 TOCTOU 窗口。
         const slot = _inflight.claim(addr, deadline);
         let issued = false;
         try {
-          // fail-closed：RPC 不可达 / 查询超时 → minted 未知，宁可拒签也不要越权签发
-          // （合约 v3 没有 per-wallet 硬上限，配额全靠后端签名把关）
-          const minted = await withTimeout(_numMinted(addr), _rpcTimeout);
-          if (minted === null) {
-            return send(req, res, 503, { error: "链上配额核验失败（RPC 不可达），请稍后重试" });
-          }
           // pending 含本次占位：已铸 + 已签未上链 > limit 就拒
           const pending = _inflight.count(addr);
           if (minted + pending > entry.limit) {

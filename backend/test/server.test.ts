@@ -666,6 +666,75 @@ test("inflight: 占位计数 / 归还幂等 / 过期自动清理", () => {
   assert.equal(s.count("0xA", now), 0);
 });
 
+test("inflight: 对账链上 minted 释放已上链槽位（FIFO / 首次只记基线 / 回退不释放）", () => {
+  const s = new InflightSlots();
+  const now = Math.floor(Date.now() / 1000);
+  s.claim("0xA", now + 600);
+  s.claim("0xA", now + 600);
+  assert.equal(s.count("0xA", now), 2);
+  // 首次只记基线：进程启动时链上已铸的 N 张不属于本进程的槽位，不能误释放
+  assert.equal(s.reconcileMinted("0xA", 0), 0);
+  assert.equal(s.count("0xA", now), 2);
+  // 链上铸了 1 张 → 释放最早的 1 个在途槽位
+  assert.equal(s.reconcileMinted("0xA", 1), 1);
+  assert.equal(s.count("0xA", now), 1);
+  // RPC 读到旧块（回退）不释放，避免误伤在途签名
+  assert.equal(s.reconcileMinted("0xA", 0), 0);
+  assert.equal(s.reconcileMinted("0xA", 1), 0);
+  assert.equal(s.count("0xA", now), 1);
+  // 再铸 1 张 → 释放剩下的
+  assert.equal(s.reconcileMinted("0xA", 2), 1);
+  assert.equal(s.count("0xA", now), 0);
+});
+
+test("server: 签名上链后能立即签下一张（pending 不再双算已铸的）", async () => {
+  const inflight = new InflightSlots();
+  let chainMinted = 0;
+  const deps = {
+    signer: new ethers.Wallet(ANVIL_KEY_0),
+    allowlist: { [ANVIL_ADDR_0]: { limit: 2 } } as Allowlist,
+    numberMintedOnChain: async () => chainMinted,
+    totalSupplyOnChain: async () => chainMinted,
+    inflight,
+  };
+  const r1 = mockRes();
+  await handler(postSign({ wallet: ANVIL_ADDR_0 }, "30.30.30.1"), r1, deps);
+  assert.equal(r1.statusCode, 200, r1._body);
+  assert.equal(inflight.count(ANVIL_ADDR_0), 1);
+
+  // 用户把第 1 张上链了——这一张既在 minted 里、原先又还占着槽位（双算）
+  chainMinted = 1;
+  const r2 = mockRes();
+  await handler(postSign({ wallet: ANVIL_ADDR_0 }, "30.30.30.2"), r2, deps);
+  // 修复前这里 403「配额已用完」，用户铸完第 1 张后 1h 内签不了第 2 张
+  assert.equal(r2.statusCode, 200, r2._body);
+  assert.equal(JSON.parse(r2._body).minted, 1);
+});
+
+test("server: /allowlist 对账已上链签名，pending 归零、remaining 不双算", async () => {
+  const inflight = new InflightSlots();
+  let chainMinted = 0;
+  const deps = {
+    signer: new ethers.Wallet(ANVIL_KEY_0),
+    allowlist: { [ANVIL_ADDR_0]: { limit: 3 } } as Allowlist,
+    numberMintedOnChain: async () => chainMinted,
+    totalSupplyOnChain: async () => chainMinted,
+    inflight,
+  };
+  // 先签一张（建立基线 0 + claim），再模拟它上链
+  const r1 = mockRes();
+  await handler(postSign({ wallet: ANVIL_ADDR_0 }, "31.31.31.1"), r1, deps);
+  assert.equal(r1.statusCode, 200, r1._body);
+  chainMinted = 1;
+
+  const al = mockRes();
+  await handler(getAllowlist(ANVIL_ADDR_0, "31.31.31.2"), al, deps);
+  const body = JSON.parse(al._body);
+  assert.equal(body.minted, 1);
+  assert.equal(body.pending, 0, "已上链的那张不该再算在待上链里");
+  assert.equal(body.remaining, 2);
+});
+
 test("server: /allowlist 的 remaining 计入待上链签名（与 /sign 同口径）", async () => {
   const inflight = new InflightSlots();
   const now = Math.floor(Date.now() / 1000);

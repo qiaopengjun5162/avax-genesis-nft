@@ -23,6 +23,13 @@ export interface Slot {
 export class InflightSlots {
   /** wallet → (slotId → 到期 unix 秒) */
   private readonly slots = new Map<string, Map<number, number>>();
+  /**
+   * wallet → 上次对账时读到的链上 numberMinted。
+   * 用来识别「签名已经上链」：链上每多铸一张，就有一个在途槽位该释放。
+   * 没有它，已上链的签名会同时算在 minted 和 pending 里（双算），
+   * limit=2 的用户铸完第 1 张后 1 小时内签不了第 2 张。
+   */
+  private readonly mintedBaseline = new Map<string, number>();
   private nextId = 1;
   private claimsSinceSweep = 0;
 
@@ -67,6 +74,45 @@ export class InflightSlots {
   }
 
   /**
+   * 与链上已铸数量对账：链上每多一张，就释放一个最早的在途槽位。
+   *
+   * 为什么要做：槽位只在 deadline（1h）到期才释放，但用户往往签完立刻上链。
+   * 上链后这张 NFT 既算在链上 minted 里、又还占着 pending 槽位——被算两次。
+   * 于是 limit=2 的用户铸完第 1 张后，1h 内签第 2 张都会撞 403「配额已用完」。
+   *
+   * 槽位只做计数、不绑定具体签名，所以按 FIFO 释放最早的即可：
+   * 释放数量 = minted 增量，总数守恒，不会多放（不会让超额签发出去）。
+   *
+   * 首次调用只记基线不释放：进程启动时链上可能已铸 N 张，那 N 张不是本
+   * 进程的槽位，贸然释放会误伤刚 claim 的在途签名。
+   */
+  reconcileMinted(wallet: string, mintedOnChain: number): number {
+    if (!this.mintedBaseline.has(wallet)) {
+      this.mintedBaseline.set(wallet, mintedOnChain);
+      return 0;
+    }
+    const prev = this.mintedBaseline.get(wallet)!;
+    // 链上读数单调。回退（RPC 读到旧块 / 换了个落后的节点）时基线**不能**
+    // 跟着往回调——否则抖动一恢复，增量就被算成「又铸了一张」，误放槽位
+    // → 在途签名被当成已上链，用户明明没铸却被放号。
+    if (mintedOnChain <= prev) return 0;
+    this.mintedBaseline.set(wallet, mintedOnChain);
+
+    const bucket = this.slots.get(wallet);
+    if (!bucket) return 0;
+    let released = 0;
+    const toRelease = mintedOnChain - prev;
+    // Map 保持插入顺序 → 最早的在前面（FIFO）
+    for (const id of bucket.keys()) {
+      if (released >= toRelease) break;
+      bucket.delete(id);
+      released += 1;
+    }
+    if (bucket.size === 0) this.slots.delete(wallet);
+    return released;
+  }
+
+  /**
    * 全局清扫：回收所有已过期槽位（含从没人再查过的钱包），返回清掉的个数。
    * 单进程签名服务的钱包数有限，O(n) 全扫很便宜。
    */
@@ -93,6 +139,7 @@ export class InflightSlots {
   /** 测试用：清空全部状态 */
   clear(): void {
     this.slots.clear();
+    this.mintedBaseline.clear();
   }
 }
 
