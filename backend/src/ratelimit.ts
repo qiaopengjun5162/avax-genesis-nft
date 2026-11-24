@@ -1,3 +1,5 @@
+import { isIP } from "node:net";
+
 /**
  * 极简内存固定窗口限流器（单进程足够；多副本需换 Redis/共享存储）。
  *
@@ -101,12 +103,24 @@ export class RateLimiter {
  */
 export function clientIp(
   req: { headers: Record<string, unknown>; socket?: { remoteAddress?: string } },
-  opts: { trustProxy?: boolean } = {},
+  opts: { trustProxy?: boolean; trustHops?: number } = {},
 ): string {
-  if (opts.trustProxy) {
-    const xff = req.headers["x-forwarded-for"];
-    if (typeof xff === "string" && xff.length) return xff.split(",")[0].trim();
-    if (Array.isArray(xff) && xff.length) return String(xff[0]).trim();
-  }
-  return req.socket?.remoteAddress ?? "unknown";
+  const socketIp = req.socket?.remoteAddress ?? "unknown";
+  if (!opts.trustProxy) return socketIp;
+
+  const xff = req.headers["x-forwarded-for"];
+  const raw = typeof xff === "string" ? xff : Array.isArray(xff) ? xff.map(String).join(",") : "";
+  // XFF 形如 "client, proxy1, proxy2"：**最左是客户端，越右越靠近本服务**。
+  // 常见 Nginx 配置 `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`
+  // 是 append —— 客户端能往最左边塞任意假 IP（每次换 = 每次一个新限流桶，绕过限流）。
+  // 所以不能取最左（首位），要从右往左数第 N 跳（N = 自己信任的代理层数）：
+  // 右侧那几段是代理自己写上去的，客户端伪造不了。N 默认 1 = 最右一段。
+  const hops = Number.isFinite(opts.trustHops) ? Math.max(1, Math.floor(opts.trustHops!)) : 1;
+  const parts = raw.split(",").map((s) => s.trim()).filter(Boolean);
+  if (parts.length === 0) return socketIp;
+  const idx = Math.max(0, parts.length - hops);
+  const chosen = parts[idx];
+  // 仍要校验是合法 IP：伪造的 "abc" / "1.2.3.4:9999" 之类不能当限流键，
+  // 否则一个字符串一个桶照样绕过；不合法就回落到伪造不了的真实 TCP 对端。
+  return isIP(chosen) ? chosen : socketIp;
 }

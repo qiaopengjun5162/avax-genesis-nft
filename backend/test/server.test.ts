@@ -225,11 +225,45 @@ test("ratelimit: clientIp 默认只用 socket 地址（XFF 可伪造，不能当
   assert.equal(clientIp({ headers: {} }), "unknown");
 });
 
-test("ratelimit: trustProxy 开启后才读 X-Forwarded-For 首段", () => {
+test("ratelimit: trustProxy 开启后取 X-Forwarded-For 最右段（客户端伪造的左侧不算）", () => {
   const req = { headers: { "x-forwarded-for": "1.1.1.1, 2.2.2.2" }, socket: { remoteAddress: "9.9.9.9" } };
-  assert.equal(clientIp(req, { trustProxy: true }), "1.1.1.1");
+  // 最右是代理 append 上去的、客户端伪造不了的那一段
+  assert.equal(clientIp(req, { trustProxy: true }), "2.2.2.2");
+  // 多级代理：trustHops=2 取倒数第二段
+  assert.equal(clientIp(req, { trustProxy: true, trustHops: 2 }), "1.1.1.1");
+  // 跳数超过段数 → 取最左可用段，不返回空
+  assert.equal(clientIp(req, { trustProxy: true, trustHops: 5 }), "1.1.1.1");
   // 开了开关但请求没带 XFF → 仍回落到 socket，不能返回空串
   assert.equal(clientIp({ headers: {}, socket: { remoteAddress: "9.9.9.9" } }, { trustProxy: true }), "9.9.9.9");
+});
+
+test("ratelimit: XFF 里塞伪造 IP / 垃圾值都不能当限流键（否则换值即换桶）", () => {
+  const socket = { remoteAddress: "9.9.9.9" };
+  // 关键攻击：客户端每次换最左的值 → 若取首位，每个假值都是一个全新桶。
+  // 现在取最右（代理写的真实地址），伪造值完全不影响 key。
+  const a = clientIp({ headers: { "x-forwarded-for": "1.2.3.4, 5.5.5.5" }, socket }, { trustProxy: true });
+  const b = clientIp({ headers: { "x-forwarded-for": "6.7.8.9, 5.5.5.5" }, socket }, { trustProxy: true });
+  assert.equal(a, b, "伪造不同左侧 IP，限流键必须相同");
+
+  // 只有一段且是垃圾值（直连场景误开 trustProxy）→ 回落 socket，不能当桶
+  assert.equal(
+    clientIp({ headers: { "x-forwarded-for": "not-an-ip" }, socket }, { trustProxy: true }),
+    "9.9.9.9",
+  );
+  // 带端口 / 空段也无效
+  assert.equal(
+    clientIp({ headers: { "x-forwarded-for": "1.2.3.4:9999" }, socket }, { trustProxy: true }),
+    "9.9.9.9",
+  );
+  assert.equal(
+    clientIp({ headers: { "x-forwarded-for": " , " }, socket }, { trustProxy: true }),
+    "9.9.9.9",
+  );
+  // IPv6 合法，必须认
+  assert.equal(
+    clientIp({ headers: { "x-forwarded-for": "2001:db8::1" }, socket }, { trustProxy: true }),
+    "2001:db8::1",
+  );
 });
 
 // ---- 集成：/sign 超速率返回 429 ----

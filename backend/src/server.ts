@@ -175,7 +175,12 @@ const ACCESS_LOG = !/^(0|false|no|off)$/i.test(env.ACCESS_LOG ?? "1");
  * 加上 ip 与裁剪过的 UA（看得出是脚本在刷还是真人在点）。
  * 4xx/5xx 不额外打堆栈——那是 error 日志的活，这里只留可聚合的结构。
  */
-export function formatAccessLog(req: IncomingMessage, code: number, ms: number) {
+export function formatAccessLog(
+  req: IncomingMessage,
+  code: number,
+  ms: number,
+  ipOpts: { trustProxy?: boolean; trustHops?: number } = clientIpOpts,
+) {
   return {
     t: new Date().toISOString(),
     method: req.method ?? "-",
@@ -183,7 +188,7 @@ export function formatAccessLog(req: IncomingMessage, code: number, ms: number) 
     path: (req.url ?? "/").split("?")[0],
     status: code,
     ms,
-    ip: clientIp(req, { trustProxy: TRUST_PROXY }),
+    ip: clientIp(req, ipOpts),
     ua: String(req.headers["user-agent"] ?? "").slice(0, 120),
   };
 }
@@ -409,6 +414,16 @@ const RPC_QUERY_TIMEOUT_MS = numEnv("RPC_QUERY_TIMEOUT_MS", 8000, { min: 100 });
  */
 const TRUST_PROXY = /^(1|true|yes|on)$/i.test(env.TRUST_PROXY ?? "");
 
+/**
+ * 信任几层代理：从 XFF 最右往左数第 N 段作为限流键。
+ * 常见 Nginx append 模式会往左追加客户端可伪造的值，取首位 = 形同虚设；
+ * 取最右（默认 1）才是代理自己写的、客户端伪造不了的那一段。
+ * 多级代理（client → LB → Nginx → 本服务）要按实际层数调大，否则会
+ * 把 nginx 的地址当成所有人的 key（一人触发、全场 429）。
+ */
+const TRUST_PROXY_HOPS = numEnv("TRUST_PROXY_HOPS", 1, { min: 1, max: 10 });
+const clientIpOpts = { trustProxy: TRUST_PROXY, trustHops: TRUST_PROXY_HOPS };
+
 async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -492,7 +507,7 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
     // GET /allowlist/:wallet —— 前端预检配额
     const alMatch = url.pathname.match(/^\/allowlist\/(0x[0-9a-fA-F]{40})$/);
     if (req.method === "GET" && alMatch) {
-      if (tooMany(req, res, allowlistLimiter, clientIp(req, { trustProxy: TRUST_PROXY }))) return;
+      if (tooMany(req, res, allowlistLimiter, clientIp(req, clientIpOpts))) return;
       // 与 /sign 同一套校验：混合大小写且 checksum 对不上时 getAddress 会抛，
       // 不接住就成了 500——客户端错误被报成服务端错误，还白扣一次限流额度。
       let wallet: string;
@@ -539,7 +554,7 @@ export async function handler(req: IncomingMessage, res: ServerResponse, deps: H
 
     // POST /sign
     if (req.method === "POST" && url.pathname === "/sign") {
-      if (tooMany(req, res, signLimiter, clientIp(req, { trustProxy: TRUST_PROXY }))) return;
+      if (tooMany(req, res, signLimiter, clientIp(req, clientIpOpts))) return;
       if (!_signer) {
         return send(req, res, 503, { error: "signer 未配置（缺 SIGNER_PRIVATE_KEY）" });
       }
