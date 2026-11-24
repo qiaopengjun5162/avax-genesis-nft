@@ -44,7 +44,7 @@ signature = backend.sign(final)
 
 | 防线 | 挡什么 | 实现 |
 |---|---|---|
-| 限流 | 匿名脚本刷爆 RPC / CPU | `/sign` 30 次·IP⁻¹·min⁻¹、`/allowlist` 120 次（前端 4s 轮询 = 15 次/分钟/标签页，60 会只够 4 个标签页 → 自己把自己 429 掉）；键默认取真实 TCP 对端（`X-Forwarded-For` 可伪造，需 `TRUST_PROXY=1` 才认） |
+| 限流 | 匿名脚本刷爆 RPC / CPU | `/sign` 30 次·IP⁻¹·min⁻¹、`/allowlist` 120 次（前端 4s 轮询 = 15 次/分钟/标签页，60 会只够 4 个标签页 → 自己把自己 429 掉）；键默认取真实 TCP 对端（XFF 可伪造，需 `TRUST_PROXY=1` 才认；开启后取 XFF **最右**第 `TRUST_PROXY_HOPS` 段并校验是合法 IP，客户端伪造的左侧段不算） |
 | fail-closed | RPC 抖动时按 `minted=0` 无限签发 | 读不到链上配额 → 503 拒签，不猜 |
 | in-flight 占位 | 连点 / 并发两个请求读到同一个 `minted`，`limit=1` 签出 2 张 | 签发前同步占位（有效期 = 签名 deadline）+ 同钱包排队；`minted + pending > limit` 即拒 |
 | 配置合法化 | `allowlist.json` 里 `limit` 手滑写成 `"三张"` → `NaN` → `minted + pending > NaN` 恒 false → **无限签发** | 非有限数回落 1 + 告警（`Math.max(1, NaN)` 仍是 `NaN`，不能直接夹） |
@@ -203,8 +203,9 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 | 场景 | 做法 |
 |---|---|
 | 看请求情况 | 默认每个请求打一行 JSON：`{t, method, path, status, ms, ip, ua}`；`ACCESS_LOG=0` 可关 |
-| 部署在 Nginx / LB 后 | 必须设 `TRUST_PROXY=1`，否则限流把所有用户算成代理那一个 IP（一人触发、全场 429） |
+| 部署在 Nginx / LB 后 | 必须设 `TRUST_PROXY=1`，否则限流把所有用户算成代理那一个 IP（一人触发、全场 429）；`TRUST_PROXY_HOPS` 按代理层数设（默认 1 = 取最右段） |
 | 不用任何反向代理直连 | 保持 `TRUST_PROXY` 留空——`X-Forwarded-For` 是客户端可伪造的，认了它限流就形同虚设 |
+| 开了 `TRUST_PROXY` 但客户端伪造 XFF | 取最右段（代理 append 写入的，客户端改不了）+ 校验合法 IP；伪造的中间/左侧值换多少次都是同一个桶。只有一段且非法 → 回落 socket 对端 |
 | 上线 | `CORS_ORIGIN` 填前端域名（逗号分隔多源）；留空是对全世界回显 `*` |
 | RPC 慢 / 挂 | `RPC_QUERY_TIMEOUT_MS`（默认 8s）兜底，超时按 fail-closed 走 503 拒签 |
 | 活动结束 / 名额到期 | 给条目加 `expiresAt` 后 `kill -HUP` 热加载，到期自动 403；启动日志会打印「其中 N 个已过期」，一眼可查有没有漏配 |
@@ -218,7 +219,7 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 | 合约 | forge | **35** 全过 | `forge test --force` |
 | 合约 lint | forge lint | 0 警告 | `forge lint` |
 | 合约覆盖率 | lcov | src/GenesisMint.sol 100% (L/S/B/F) | `forge coverage --report summary` |
-| 后端 | node:test | **96** 全过 | `cd backend && npm test` |
+| 后端 | node:test | **97** 全过 | `cd backend && npm test` |
 | 后端冒烟 | curl（真实进程） | 14 项（默认）/ 16 项（`SMOKE_SIGN=1`） | `bash backend/script/smoke.sh`；换端口 `SMOKE_PORT=8792 bash backend/script/smoke.sh` |
 | 前端 | node:test | **44** 全过 | `cd frontend && npm test` |
 | 前端 | tsc | 类型检查 | `cd frontend && npx tsc --noEmit` |
