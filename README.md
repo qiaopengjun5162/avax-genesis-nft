@@ -47,6 +47,7 @@ signature = backend.sign(final)
 | 限流 | 匿名脚本刷爆 RPC / CPU | `/sign` 30 次·IP⁻¹·min⁻¹、`/allowlist` 120 次（前端 4s 轮询 = 15 次/分钟/标签页，60 会只够 4 个标签页 → 自己把自己 429 掉）；键默认取真实 TCP 对端（XFF 可伪造，需 `TRUST_PROXY=1` 才认；开启后取 XFF **最右**第 `TRUST_PROXY_HOPS` 段并校验是合法 IP，客户端伪造的左侧段不算） |
 | fail-closed | RPC 抖动时按 `minted=0` 无限签发 | 读不到链上配额 → 503 拒签，不猜 |
 | in-flight 占位 | 连点 / 并发两个请求读到同一个 `minted`，`limit=1` 签出 2 张 | 签发前同步占位（有效期 = 签名 deadline）+ 同钱包排队；`minted + pending > limit` 即拒 |
+| 已上链槽位对账 | 签完立刻上链，那张同时算在 `minted` 和 `pending` 里 → `limit=2` 的用户 1h 内签不了第 2 张 | 每次读到可信 `minted` 后按 FIFO 释放等量槽位；首次只记基线、RPC 回退不回调基线 |
 | 配置合法化 | `allowlist.json` 里 `limit` 手滑写成 `"三张"` → `NaN` → `minted + pending > NaN` 恒 false → **无限签发** | 非有限数回落 1 + 告警（`Math.max(1, NaN)` 仍是 `NaN`，不能直接夹） |
 | 元数据完整性 | 合约 `tokenURI` 用字符串拼 JSON，imageURI 里一个 `"` 就让整份元数据变非法 JSON——**写进链上、永久坏掉** | 后端拒收含 `"` / `\` / 控制字符的 imageURI（内联 SVG 请用 base64），错误文案说明原因 |
 | 链上读取超时 | RPC 挂住时请求永不返回，`/allowlist` 每 4s 轮询一次会越堆越多 | 两个端点共用 `RPC_QUERY_TIMEOUT_MS`（默认 8s）；超时 → `null` → 503 / 「配额未知」 |
@@ -219,7 +220,7 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 | 合约 | forge | **35** 全过 | `forge test --force` |
 | 合约 lint | forge lint | 0 警告 | `forge lint` |
 | 合约覆盖率 | lcov | src/GenesisMint.sol 100% (L/S/B/F) | `forge coverage --report summary` |
-| 后端 | node:test | **97** 全过 | `cd backend && npm test` |
+| 后端 | node:test | **100** 全过 | `cd backend && npm test` |
 | 后端冒烟 | curl（真实进程） | 14 项（默认）/ 16 项（`SMOKE_SIGN=1`） | `bash backend/script/smoke.sh`；换端口 `SMOKE_PORT=8792 bash backend/script/smoke.sh` |
 | 前端 | node:test | **44** 全过 | `cd frontend && npm test` |
 | 前端 | tsc | 类型检查 | `cd frontend && npx tsc --noEmit` |
