@@ -231,8 +231,14 @@ test("ratelimit: trustProxy 开启后取 X-Forwarded-For 最右段（客户端�
   assert.equal(clientIp(req, { trustProxy: true }), "2.2.2.2");
   // 多级代理：trustHops=2 取倒数第二段
   assert.equal(clientIp(req, { trustProxy: true, trustHops: 2 }), "1.1.1.1");
-  // 跳数超过段数 → 取最左可用段，不返回空
-  assert.equal(clientIp(req, { trustProxy: true, trustHops: 5 }), "1.1.1.1");
+  // 跳数超过段数 = 链路与配置不符：XFF 里没有「代理写入、客户端改不了」的
+  // 那一段，最左是客户端伪造的。原来 Math.max(0, len-hops) 会钳到最左 →
+  // 每次换最左值就换一个限流桶，限流被绕过。必须回落真实 socket 地址。
+  assert.equal(clientIp(req, { trustProxy: true, trustHops: 5 }), "9.9.9.9");
+  // 2 段 / 3 跳同理：只要段数 < 跳数就不信 XFF
+  assert.equal(clientIp(req, { trustProxy: true, trustHops: 3 }), "9.9.9.9");
+  // 恰好够数时仍按右起第 N 段取，正常多级代理不受影响
+  assert.equal(clientIp(req, { trustProxy: true, trustHops: 2 }), "1.1.1.1");
   // 开了开关但请求没带 XFF → 仍回落到 socket，不能返回空串
   assert.equal(clientIp({ headers: {}, socket: { remoteAddress: "9.9.9.9" } }, { trustProxy: true }), "9.9.9.9");
 });
@@ -264,6 +270,17 @@ test("ratelimit: XFF 里塞伪造 IP / 垃圾值都不能当限流键（否则�
     clientIp({ headers: { "x-forwarded-for": "2001:db8::1" }, socket }, { trustProxy: true }),
     "2001:db8::1",
   );
+
+  // 回归：配置声明 2 层代理，但请求只带 1 段 XFF（绕过代理直连 / 少配一层）。
+  // 这段是客户端伪造的，绝不能当限流键——否则换值就换桶，限流形同虚设。
+  const forgedA = { headers: { "x-forwarded-for": "1.1.1.1" }, socket };
+  const forgedB = { headers: { "x-forwarded-for": "2.2.2.2" }, socket };
+  assert.equal(
+    clientIp(forgedA, { trustProxy: true, trustHops: 2 }),
+    clientIp(forgedB, { trustProxy: true, trustHops: 2 }),
+    "段数不足时伪造不同的 XFF，限流键必须收敛到同一个 socket 地址",
+  );
+  assert.equal(clientIp(forgedA, { trustProxy: true, trustHops: 2 }), "9.9.9.9");
 });
 
 // ---- 集成：/sign 超速率返回 429 ----

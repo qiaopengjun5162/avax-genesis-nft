@@ -118,8 +118,14 @@ export function clientIp(
   const hops = Number.isFinite(opts.trustHops) ? Math.max(1, Math.floor(opts.trustHops!)) : 1;
   const parts = raw.split(",").map((s) => s.trim()).filter(Boolean);
   if (parts.length === 0) return socketIp;
-  const idx = Math.max(0, parts.length - hops);
-  const chosen = parts[idx];
+  // 段数少于声明的信任跳数 = 实际链路与配置不符（少了一层代理，或请求绕过
+  // 代理直连）。此时 XFF 里**根本不存在**「我方代理写入、客户端改不了」的那
+  // 一段：最左是客户端可伪造的，照取等于把限流键交给客户端 → 换值即换桶。
+  // 宁可回落 socket（真实 TCP 对端，伪造不了）：代价是所有请求挤到代理那
+  // 一个 IP、更容易撞限流——可用性问题一眼能从访问日志看出来；而限流被绕
+  // 过是安全问题，悄无声息。
+  if (parts.length < hops) return socketIp;
+  const chosen = parts[parts.length - hops];
   // 仍要校验是合法 IP：伪造的 "abc" / "1.2.3.4:9999" 之类不能当限流键，
   // 否则一个字符串一个桶照样绕过；不合法就回落到伪造不了的真实 TCP 对端。
   return isIP(chosen) ? chosen : socketIp;
