@@ -139,6 +139,11 @@ export default function MintPanel({
     setRateLimitedSec(0);
     // 换钱包要清退避：上一个地址撞的限流不该让新地址继续等着
     backoffUntil.current = 0;
+    // 立刻拉新地址的配额，别留 4s 空窗：轮询 effect 只在 mount 时跑首次，
+    // 切钱包后要等下一个 tick，期间 quota=null → 按钮条件全 false → 可点，
+    // 用户按旧印象点下去，走的就是还没预检过的新地址（新地址可能不在白名单，
+    // 白跑一次 /sign 还白扣一次限流）。连上钱包的那一刻同样走这里。
+    pollQuota();
   }, [address]);
 
   async function onMint() {
@@ -344,7 +349,16 @@ export default function MintPanel({
 
       <button
         className={btnPrimary}
-        disabled={busy !== null || wrongChain || quotaDone || quotaUnknown || quotaExpired || backendDown || !priceReady}
+        disabled={
+          busy !== null ||
+          wrongChain ||
+          quotaDone ||
+          quotaUnknown ||
+          quotaExpired ||
+          backendDown ||
+          quota === null ||
+          !priceReady
+        }
         onClick={onMint}
       >
         {busy === "signing"
@@ -353,6 +367,8 @@ export default function MintPanel({
             ? "② 提交链上交易…"
               : backendDown
               ? "⏳ 签名服务不可用"
+              : quota === null
+              ? "⏳ 读取配额中…"
               : !priceReady
               ? priceError
                 ? "⚠ 价格读取失败"
