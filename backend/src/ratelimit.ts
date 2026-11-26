@@ -23,28 +23,35 @@ export class RateLimiter {
   /** 桶数量硬上限：超过就淘汰最老的，宁可牺牲计数精度也不让内存无上限 */
   private readonly maxKeys: number;
   private lastSweepAt = 0;
+  /** 累计全量清扫次数（测试 / 排障：用来证明热路径没有退化成每请求一次 O(n)） */
+  private sweepCount = 0;
   private warnedOverflow = false;
 
   constructor(max: number, windowMs: number, opts: { maxKeys?: number } = {}) {
     this.max = max;
     this.windowMs = windowMs;
-    this.maxKeys = opts.maxKeys ?? 50_000;
+    // 至少留 1 个桶，否则淘汰逻辑会把刚插入的也删掉
+    this.maxKeys = Math.max(1, Math.floor(opts.maxKeys ?? 50_000));
   }
 
   /**
    * 记一次命中：返回是否放行 + 剩余次数 + 距重置秒数。
    *
-   * 惰性清扫：桶过了窗口就永远不会被读到，不回收的话 Map 会随「来访过的
-   * 不同 IP 数」单调增长——限流本身反而成了内存 DoS 面。每窗口最多扫一次
-   * （O(n)），key 数超阈值时立刻扫，避免突发流量把 Map 撑大。
+   * 惰性清扫分两件事，**不能混**：
+   *  - 过期回收：按**时间**触发，每个窗口最多一次 O(n) 全表扫；
+   *  - 容量淘汰：按**数量**触发，从 Map 头部（最老）删掉溢出量，O(溢出量)。
+   *
+   * 之前把「桶数 >= maxKeys」也当成清扫条件，于是桶满之后**每一次请求**
+   * 都全表扫一遍（50k 个桶 = 每请求 5 万次迭代）。泛洪时这不是限流，是
+   * CPU 放大器：攻击者只需把桶填满，之后每个请求都让我们做 O(n) 工作。
    */
   hit(key: string, now = Date.now()): RateLimitResult {
-    if (this.buckets.size > 0 && (now - this.lastSweepAt >= this.windowMs || this.buckets.size >= this.maxKeys)) {
-      this.sweep(now);
+    if (this.buckets.size > 0 && now - this.lastSweepAt >= this.windowMs) {
+      this.sweepExpired(now);
     }
     const b = this.buckets.get(key);
     if (!b || now >= b.resetAt) {
-      this.buckets.set(key, { count: 1, resetAt: now + this.windowMs });
+      this.insert(key, { count: 1, resetAt: now + this.windowMs });
       return { allowed: true, remaining: this.max - 1, retryAfterSec: 0 };
     }
     if (b.count >= this.max) {
@@ -58,18 +65,30 @@ export class RateLimiter {
     return { allowed: true, remaining: this.max - b.count, retryAfterSec: 0 };
   }
 
-  /** 清掉已过期的桶；仍超限则按插入顺序淘汰最老的（Map 保序） */
-  private sweep(now: number): void {
+  /** 插入新桶（已有同名桶则覆盖），必要时先按溢出量淘汰最老的 */
+  private insert(key: string, bucket: { count: number; resetAt: number }): void {
+    if (!this.buckets.has(key) && this.buckets.size >= this.maxKeys) {
+      // 同一窗口内涌进海量不同 IP：清扫不掉，只能淘汰。代价是最老的桶计数
+      // 归零（限流对它们临时放宽），换来的是内存有界——OOM 比放宽糟得多。
+      this.evictOldest(this.buckets.size - this.maxKeys + 1);
+    }
+    this.buckets.set(key, bucket);
+  }
+
+  /** 清掉已过期的桶 */
+  private sweepExpired(now: number): void {
     this.lastSweepAt = now;
+    this.sweepCount += 1;
     for (const [k, b] of this.buckets) {
       if (now >= b.resetAt) this.buckets.delete(k);
     }
-    if (this.buckets.size <= this.maxKeys) return;
-    // 同一窗口内涌进海量不同 IP：清扫不掉，只能淘汰。代价是最老的桶计数
-    // 归零（限流对它们临时放宽），换来的是内存有界——OOM 比放宽糟得多。
-    let overflow = this.buckets.size - this.maxKeys;
+  }
+
+  /** 从最老的开始删 count 个（Map 保序，只做 O(count)，不扫全表） */
+  private evictOldest(count: number): void {
+    let left = count;
     for (const k of this.buckets.keys()) {
-      if (overflow-- <= 0) break;
+      if (left-- <= 0) break;
       this.buckets.delete(k);
     }
     if (!this.warnedOverflow) {
@@ -81,6 +100,11 @@ export class RateLimiter {
   /** 当前桶数量（测试 / 排障用） */
   get size(): number {
     return this.buckets.size;
+  }
+
+  /** 累计全量清扫次数（测试 / 排障用） */
+  get sweeps(): number {
+    return this.sweepCount;
   }
 
   /** 测试用：清空所有状态 */

@@ -209,6 +209,31 @@ test("ratelimit: 窗口过期后重新计数", () => {
   assert.equal(rl.hit("x", 2001).allowed, true); // 越过 resetAt：放行
 });
 
+test("ratelimit: 桶数到上限只淘汰最老的，热路径不做全表扫描", () => {
+  // 回归：旧实现把「size >= maxKeys」也算作清扫条件，桶满之后**每个请求**
+  // 都全表扫一遍（50k 桶 → 每请求 5 万次迭代）。泛洪时等于 CPU 放大器。
+  const rl = new RateLimiter(1, 1000, { maxKeys: 10 });
+  const t = 1000;
+  for (let i = 0; i < 100; i++) rl.hit(`ip-${i}`, t);
+  assert.equal(rl.size, 10, "内存必须有界");
+  assert.ok(rl.sweeps <= 1, `热路径不该反复全表清扫，实际 sweeps=${rl.sweeps}`);
+  // 保留的是最新的 10 个：ip-99 还在（同窗口第 2 次 → 拒），ip-0 已被淘汰
+  assert.equal(rl.hit("ip-99", t).allowed, false);
+  assert.equal(rl.hit("ip-0", t).allowed, true);
+  assert.equal(rl.size, 10, "淘汰后仍不超上限");
+});
+
+test("ratelimit: 窗口翻页时清掉过期桶（过期回收仍在，只是挪出热路径）", () => {
+  const rl = new RateLimiter(1, 1000, { maxKeys: 100 });
+  rl.hit("a", 1000);
+  rl.hit("b", 1000);
+  assert.equal(rl.size, 2);
+  // 窗口翻页后的下一次命中触发一次全量清扫
+  rl.hit("c", 2500);
+  assert.equal(rl.size, 1, "a/b 已过期必须被回收，只剩下 c");
+  assert.equal(rl.hit("a", 2500).allowed, true, "过期后重新计数");
+});
+
 test("ratelimit: clear 后状态归零", () => {
   const rl = new RateLimiter(1, 1000);
   assert.equal(rl.hit("k").allowed, true);
