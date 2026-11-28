@@ -9,7 +9,15 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { STATUS_TEXT, statusLabel, supplyLabel } from "../lib/stats.ts";
+import { STATUS_TEXT, statusLabel, supplyLabel, emptyGalleryHint, asSupply } from "../lib/stats.ts";
+
+test("asSupply: 只认 bigint，其余类型当读不到而非 0", () => {
+  assert.equal(asSupply(0n), 0n);
+  assert.equal(asSupply(7n), 7n);
+  for (const bad of [undefined, null, "5", 5, NaN, {}, []]) {
+    assert.equal(asSupply(bad), undefined, `非 bigint 值 ${String(bad)} 必须归一成 undefined`);
+  }
+});
 
 test("statusLabel: 读不到不能显示成 Waiting", () => {
   assert.equal(statusLabel(undefined), "…");
@@ -30,4 +38,14 @@ test("supplyLabel: 任一项读不到都不能伪造成 0", () => {
 test("supplyLabel: 大额走 bigint 字符串，不经 Number 丢精度", () => {
   const huge = 2n ** 100n;
   assert.equal(supplyLabel(huge, huge), `${huge} / ${huge}`);
+});
+
+test("emptyGalleryHint: 总量读不到时不断言「全网没有人 mint」", () => {
+  // 读不到 ≠ 0：tokensOfOwner 读成功返回空只够说「你没有」，
+  // 不能顺带对全网总量下结论（旧实现 `?? 0n` 就会走到这条假事实）
+  assert.equal(emptyGalleryHint(undefined), "你还没有 NFT——点上面按钮领一张。");
+  assert.notEqual(emptyGalleryHint(undefined), "还没有任何人 mint。");
+  // 明确读到 0 才敢说全网没人铸
+  assert.equal(emptyGalleryHint(0n), "还没有任何人 mint。");
+  assert.equal(emptyGalleryHint(3n), "你还没有 NFT——点上面按钮领一张。");
 });

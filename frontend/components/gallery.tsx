@@ -6,6 +6,7 @@ import { CONTRACT_ADDRESS } from "@/lib/config";
 import { genesisMintAbi, shortAddr } from "@/lib/abi";
 import { decodeTokenUri } from "@/lib/token-uri";
 import { resolveImageUrl } from "@/lib/media";
+import { supplyLabel, emptyGalleryHint, asSupply } from "@/lib/stats";
 
 type Nft = {
   tokenId: number;
@@ -40,11 +41,16 @@ export default function Gallery() {
     query: poll,
   });
 
-  const totalNum = Number(totalSupply ?? 0n);
-  const maxNum = maxSupply === undefined ? null : Number(maxSupply);
+  // useReadContract 的 data 类型是 unknown，必须运行时收窄成 bigint，
+  // 不能像旧代码 `?? 0n` 那样把「没读到 / 类型不对」糊成 0。
+  const total = asSupply(totalSupply);
+  const max = asSupply(maxSupply);
+  // queryKey 保留 undefined 以便与「真实为 0」区分（否则数据从失败恢复时
+  // key 不变，React Query 不会重查）。
+  const totalKey = total === undefined ? undefined : Number(total);
 
   const { data: mine, error, isFetching, refetch } = useQuery({
-    queryKey: ["my-nfts", address, totalNum],
+    queryKey: ["my-nfts", address, totalKey],
     enabled: Boolean(address && publicClient),
     refetchInterval: 4000,
     queryFn: async (): Promise<Nft[]> => {
@@ -76,14 +82,12 @@ export default function Gallery() {
     },
   });
 
-  const supplyLabel = maxNum === null ? `${totalNum} / …` : `${totalNum} / ${maxNum}`;
-
   return (
     <div>
       <div className="mb-3 flex items-center justify-between">
         <h2 className="text-lg font-semibold">我的 NFT</h2>
         <span className="text-xs text-gray-400">
-          全网已铸 {supplyLabel}
+          全网已铸 {supplyLabel(total, max)}
           {isFetching && " · 扫描中…"}
         </span>
       </div>
@@ -134,9 +138,7 @@ export default function Gallery() {
           ))}
         </div>
       ) : mine ? (
-        <p className="text-sm text-gray-500">
-          {totalNum === 0 ? "还没有任何人 mint。" : "你还没有 NFT——点上面按钮领一张。"}
-        </p>
+        <p className="text-sm text-gray-500">{emptyGalleryHint(total)}</p>
       ) : (
         // 首次加载：既不是「没有」，也还不到报错的时候
         <p className="text-sm text-gray-500">正在读取你的 NFT…</p>
