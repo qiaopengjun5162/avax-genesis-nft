@@ -1,5 +1,6 @@
 import { JsonRpcProvider, Contract } from "ethers";
 import { CONTRACT_ADDRESS, FUJI_RPC } from "./protocol.ts";
+import { toOnChainCount } from "./chain-value.ts";
 
 /** 链上只读视图聚合：numberMinted / totalSupply / usedHashes / signer */
 const iface = new Contract(
@@ -23,7 +24,7 @@ const iface = new Contract(
  */
 export async function numberMintedOnChain(wallet: string): Promise<number | null> {
   try {
-    return Number(await iface.numberMinted(wallet));
+    return toOnChainCount(await iface.numberMinted(wallet));
   } catch {
     return null;
   }
@@ -53,7 +54,7 @@ export async function signerOnChain(): Promise<string | null> {
  */
 export async function totalSupplyOnChain(): Promise<number | null> {
   try {
-    return Number(await iface.totalSupply());
+    return toOnChainCount(await iface.totalSupply());
   } catch {
     return null;
   }
