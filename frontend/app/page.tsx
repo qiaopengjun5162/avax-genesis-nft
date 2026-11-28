@@ -2,7 +2,8 @@
 
 import { formatEther } from "viem";
 import { useReadContracts } from "wagmi";
-import { CONTRACT_ADDRESS, STATUS_TEXT } from "@/lib/config";
+import { CONTRACT_ADDRESS } from "@/lib/config";
+import { statusLabel, supplyLabel } from "@/lib/stats";
 import { genesisMintAbi } from "@/lib/abi";
 import ConnectButton from "@/components/connect-button";
 import MintPanel from "@/components/mint-panel";
@@ -80,15 +81,8 @@ export default function Home() {
       )}
 
       <div className="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Stat
-          label="已铸"
-          value={
-            maxSupply !== undefined
-              ? `${Number(totalSupply ?? 0n)} / ${Number(maxSupply)}`
-              : `${Number(totalSupply ?? 0n)} / …`
-          }
-        />
-        <Stat label="状态" value={STATUS_TEXT[status ?? 0] ?? "?"} />
+        <Stat label="已铸" value={supplyLabel(totalSupply, maxSupply)} />
+        <Stat label="状态" value={statusLabel(status)} />
         <Stat
           label="价格"
           value={priceWei !== undefined ? `${Number(formatEther(priceWei))} AVAX` : "…"}

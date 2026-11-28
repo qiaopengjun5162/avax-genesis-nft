@@ -98,11 +98,8 @@ export const SIGNER_URL = normalizeBaseUrl(
   "http://127.0.0.1:8787",
 );
 
-export const STATUS_TEXT = [
-  "⏳ Waiting（未开始）",
-  "🟢 Started（进行中）",
-  "⏸ Paused（已暂停）",
-];
+/** 状态码文案抽到纯模块（可被 node:test 直接跑）；re-export 保持既有引用不变 */
+export { STATUS_TEXT } from "@/lib/stats";
 
 export const explorerTx = (hash: string) =>
   `https://testnet.avascan.info/blockchain/c/tx/${hash}`;
