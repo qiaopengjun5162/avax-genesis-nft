@@ -222,7 +222,7 @@ kill -HUP <backend-pid>            # 热加载，不用重启（日志会打印�
 | 合约覆盖率 | lcov | src/GenesisMint.sol 100% (L/S/B/F) | `forge coverage --report summary` |
 | 后端 | node:test | **102** 全过 | `cd backend && npm test` |
 | 后端冒烟 | curl（真实进程） | 14 项（默认）/ 16 项（`SMOKE_SIGN=1`） | `bash backend/script/smoke.sh`；换端口 `SMOKE_PORT=8792 bash backend/script/smoke.sh` |
-| 前端 | node:test | **44** 全过 | `cd frontend && npm test` |
+| 前端 | node:test | **47** 全过 | `cd frontend && npm test` |
 | 前端 | tsc | 类型检查 | `cd frontend && npx tsc --noEmit` |
 | 前端 | eslint | 0 error | `cd frontend && npm run lint` |
 | 前端 | next build | 生产构建（含预渲染） | `cd frontend && npx next build` |
